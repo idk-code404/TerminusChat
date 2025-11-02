@@ -1,42 +1,53 @@
-import React, { useState, useEffect } from 'react';
-import TerminalUI from './components/TerminalUI';
+import React, { useState, useEffect } from "react";
+import TerminalUI from "./components/TerminalUI";
 
 export default function App() {
-  // Load nick from localStorage or empty string
-  const [nick, setNick] = useState(localStorage.getItem('nick') || '');
+  // restore nick + admin from localStorage
+  const [nick, setNick] = useState(localStorage.getItem("nick") || "guest");
+  const [isAdmin, setIsAdmin] = useState(localStorage.getItem("isAdmin") === "true");
   const [ws, setWs] = useState(null);
 
-  // Prompt for nickname if not set
   useEffect(() => {
-    if (!nick) {
-      let name = '';
-      while (!name) {
-        name = prompt("Welcome! What would you like to be called?")?.trim() || '';
-      }
-      setNick(name);
-      localStorage.setItem('nick', name);
-    }
-  }, [nick]);
+    if (typeof window === "undefined") return;
 
-  // Open WebSocket connection
-  useEffect(() => {
-    if (!nick) return; // wait for nick before connecting
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${location.hostname}:3000`;
-    const socket = new WebSocket(url);
+    // build backend URL
+    const backendBase =
+      import.meta.env.VITE_BACKEND_URL ||
+      `${location.protocol}//${location.hostname}:3000`;
+    const backend = backendBase.replace(/\/$/, "");
+    const wsUrl = backend.replace(/^http/, "ws");
 
-    socket.addEventListener('open', () => console.log('WebSocket connected'));
-    socket.addEventListener('error', (e) => console.warn('WebSocket error', e));
+    const socket = new WebSocket(wsUrl);
 
-    // Send initial nick to server
-    socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ type: 'nick', newNick: nick }));
+    const handleOpen = () => console.log("🟢 Connected to", wsUrl);
+    const handleError = (e) => console.warn("WebSocket error:", e);
+    const handleClose = () => console.log("🔴 Disconnected");
+
+    socket.addEventListener("open", handleOpen);
+    socket.addEventListener("error", handleError);
+    socket.addEventListener("close", handleClose);
+
+    // Listen for server messages related to admin login/logout
+    socket.addEventListener("message", (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "admin-status") {
+          setIsAdmin(msg.value);
+          localStorage.setItem("isAdmin", msg.value);
+        }
+      } catch {}
     });
 
     setWs(socket);
 
-    return () => socket.close();
-  }, [nick]);
+    return () => {
+      socket.removeEventListener("open", handleOpen);
+      socket.removeEventListener("error", handleError);
+      socket.removeEventListener("close", handleClose);
+      socket.close();
+      setWs(null);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#071013] text-[#9db0a5] p-6 font-mono">
@@ -44,19 +55,14 @@ export default function App() {
         <header className="flex items-center gap-4 mb-6">
           <div className="bg-[#061010] text-[#00ff6a] px-3 py-2 rounded">terminus</div>
           <h1 className="text-lg">TerminusChat</h1>
+          {isAdmin && (
+            <span className="ml-4 text-[#00ff6a] text-sm border border-green-600 rounded px-2 py-1">
+              ADMIN MODE
+            </span>
+          )}
         </header>
 
-        {/* Only render TerminalUI when nickname and WS connection are ready */}
-        {nick && ws && (
-          <TerminalUI
-            socket={ws}
-            nick={nick}
-            setNick={(newNick) => {
-              setNick(newNick);
-              localStorage.setItem('nick', newNick);
-            }}
-          />
-        )}
+        <TerminalUI socket={ws} nick={nick} setNick={setNick} isAdmin={isAdmin} />
       </div>
     </div>
   );
