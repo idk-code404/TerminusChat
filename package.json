@@ -1,0 +1,13 @@
+{
+  "name": "terminuschat",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm:backend:dev\" \"npm:frontend:dev\"",
+    "backend:dev": "cd backend && npm run dev",
+    "frontend:dev": "cd frontend && npm run dev",
+    "install:all": "cd backend && npm install && cd ../frontend && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.0.0"
+  }
+}

@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - JWT_SECRET=changeme
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+# Usage:
+# 1. docker compose build
+# 2. docker compose up
+# Frontend will be available at http://localhost:8080
+# Backend (WebSocket + API) at ws://localhost:3000 and http://localhost:3000
