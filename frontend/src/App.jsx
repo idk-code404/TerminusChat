@@ -27,5 +27,10 @@ export default function App(){
         <TerminalUI socket={ws} nick={nick} setNick={setNick} />
       </div>
     </div>
+    // inside App.jsx useEffect
+const backendBase = import.meta.env.VITE_BACKEND_URL || `${location.protocol}//${location.hostname}:3000`;
+const backend = backendBase.replace(/\/$/, '');
+const wsUrl = backend.replace(/^http/, 'ws');
+const socket = new WebSocket(wsUrl);
   )
 }
