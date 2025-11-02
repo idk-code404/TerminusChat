@@ -1,123 +1,129 @@
 import React, { useState, useEffect, useRef } from "react";
 
-export default function TerminalUI({ socket, nick, setNick }) {
+export default function TerminalUI({ socket, nick, setNick, isAdmin }) {
+  const terminalRef = useRef(null);
+  const inputRef = useRef(null);
   const [lines, setLines] = useState([]);
-  const [input, setInput] = useState("");
-  const termRef = useRef(null);
 
+  // Append message to terminal
+  const appendLine = (html) => {
+    setLines((prev) => [...prev, html]);
+  };
+
+  // Scroll down when new messages appear
+  useEffect(() => {
+    const el = terminalRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [lines]);
+
+  // Listen for messages from WebSocket
   useEffect(() => {
     if (!socket) return;
-    socket.addEventListener("message", (event) => {
-      const msg = JSON.parse(event.data);
-
-      if (msg.type === "nick-assign") {
-        setNick(msg.nick);
-        localStorage.setItem("nick", msg.nick);
-        localStorage.setItem("clientId", msg.id);
-      }
-
-      else if (msg.type === "message") {
-        appendLine(`<span class="nick">${msg.nick}:</span> ${escapeHtml(msg.text)}`);
-      }
-
-      else if (msg.type === "system") {
-        appendLine(`<span class="meta">[system]</span> ${escapeHtml(msg.text)}`);
-      }
-
-      else if (msg.type === "history") {
-        msg.data.forEach((m) => {
-          if (m.type === "message")
-            appendLine(`<span class="nick">${m.nick}:</span> ${escapeHtml(m.text)}`);
-          else if (m.type === "system")
-            appendLine(`<span class="meta">[system]</span> ${escapeHtml(m.text)}`);
-        });
-      }
-
-      else if (msg.type === "clear") {
-        setLines([]);
-      }
-    });
+    const onMsg = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "message") {
+          appendLine(
+            `<span class="nick">${msg.nick}</span>: ${escapeHtml(msg.text)}`
+          );
+        } else if (msg.type === "system") {
+          appendLine(`<span class="meta">[system]</span> ${escapeHtml(msg.text)}`);
+        } else if (msg.type === "history") {
+          msg.history.forEach((m) =>
+            appendLine(
+              `<span class="nick">${m.nick}</span>: ${escapeHtml(m.text)}`
+            )
+          );
+        } else if (msg.type === "clear") {
+          setLines([]);
+        }
+      } catch {}
+    };
+    socket.addEventListener("message", onMsg);
+    return () => socket.removeEventListener("message", onMsg);
   }, [socket]);
 
-  const appendLine = (html) => {
-    setLines((prev) => [...prev, html].slice(-500));
-    setTimeout(() => {
-      if (termRef.current)
-        termRef.current.scrollTop = termRef.current.scrollHeight;
-    }, 50);
-  };
+  const escapeHtml = (str) =>
+    str.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  const sendCommand = (text) => {
-    if (!text.trim()) return;
-    if (text.startsWith("/")) {
-      const [cmd, ...args] = text.slice(1).split(" ");
-      handleCommand(cmd.toLowerCase(), args);
-    } else if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "message", text, nick }));
-    }
-    setInput("");
-  };
+  const handleCommand = (cmdline) => {
+    const [cmd, ...rest] = cmdline.trim().substring(1).split(/\s+/);
+    const args = rest.join(" ");
 
-  const handleCommand = (cmd, args) => {
     switch (cmd) {
-      case "nick": {
-        const newNick = args.join(" ").substring(0, 24);
-        if (!newNick) {
-          appendLine("<span class='meta'>Usage: /nick &lt;newName&gt;</span>");
-          return;
-        }
-        socket.send(JSON.stringify({ type: "nick", newNick }));
-        setNick(newNick);
-        localStorage.setItem("nick", newNick);
-        break;
-      }
-
-      case "clear": {
-        const key = args[0] || "";
-        if (key)
-          socket.send(JSON.stringify({ type: "clear", key }));
-        else
-          setLines([]);
-        break;
-      }
-
       case "help":
-        appendLine("<span class='meta'>Commands: /nick &lt;name&gt;, /clear [admin-key], /help</span>");
+        appendLine(
+          `<span class="meta">Available commands: /help, /nick &lt;name&gt;, /me &lt;action&gt;, /login &lt;key&gt;, /logout, /clear</span>`
+        );
+        break;
+
+      case "nick":
+        if (!args) return appendLine("<span class='meta'>Usage: /nick &lt;name&gt;</span>");
+        setNick(args.substring(0, 24));
+        localStorage.setItem("nick", args);
+        socket.send(JSON.stringify({ type: "nick", newNick: args }));
+        appendLine(`<span class="meta">Nickname changed to ${args}</span>`);
+        break;
+
+      case "login":
+        if (!args) return appendLine("<span class='meta'>Usage: /login &lt;key&gt;</span>");
+        socket.send(JSON.stringify({ type: "login", key: args }));
+        break;
+
+      case "logout":
+        socket.send(JSON.stringify({ type: "logout" }));
+        appendLine("<span class='meta'>Logged out of admin mode.</span>");
+        break;
+
+      case "me":
+        if (!args) return appendLine("<span class='meta'>Usage: /me &lt;action&gt;</span>");
+        socket.send(JSON.stringify({ type: "message", nick, text: `* ${nick} ${args}` }));
+        break;
+
+      case "clear":
+        if (isAdmin) {
+          socket.send(JSON.stringify({ type: "clear" }));
+        } else {
+          appendLine("<span class='meta'>(local) chat cleared.</span>");
+          setLines([]);
+        }
         break;
 
       default:
-        appendLine(`<span class='meta'>Unknown command: /${cmd}</span>`);
+        appendLine(`<span class="meta">Unknown command: /${cmd}</span>`);
     }
   };
 
+  const handleSend = (value) => {
+    if (!value) return;
+    if (value.startsWith("/")) return handleCommand(value);
+    socket.send(JSON.stringify({ type: "message", nick, text: value }));
+  };
+
   return (
-    <div>
+    <div className="bg-black rounded-lg p-3">
       <div
-        ref={termRef}
-        className="bg-black p-3 rounded h-[70vh] overflow-y-auto text-green-400 font-mono text-sm"
+        ref={terminalRef}
+        className="h-[60vh] overflow-y-auto font-mono text-sm text-[#cfeedd]"
       >
-        {lines.map((l, i) => (
-          <div key={i} dangerouslySetInnerHTML={{ __html: l }} />
+        {lines.map((line, i) => (
+          <div key={i} dangerouslySetInnerHTML={{ __html: line }} />
         ))}
       </div>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          sendCommand(input);
-        }}
-        className="flex gap-2 mt-2"
-      >
+      <div className="flex gap-2 mt-3">
         <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          className="flex-1 bg-[#0a0a0a] text-green-400 border border-green-700 rounded p-2"
-          placeholder="Type message or /help"
+          ref={inputRef}
+          type="text"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              handleSend(e.target.value);
+              e.target.value = "";
+            }
+          }}
+          className="flex-1 bg-[#020807] border border-[#004d2b] rounded p-2 text-[#cfeedd]"
+          placeholder="Type a message or command (/help)"
         />
-      </form>
+      </div>
     </div>
   );
-}
-
-function escapeHtml(unsafe) {
-  return unsafe.replace(/[&<"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", '"': "&quot;", "'": "&#039;" }[m]));
 }
