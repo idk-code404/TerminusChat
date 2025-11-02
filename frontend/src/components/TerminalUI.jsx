@@ -1,151 +1,108 @@
-// frontend/src/components/TerminalUI.jsx
-import React, { useEffect, useRef, useState } from 'react'
-import ChatInput from './ChatInput'
-
-function escapeHtml(str){ return str.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]); }
+import React, { useState, useEffect, useRef } from "react";
 
 export default function TerminalUI({ socket, nick, setNick }) {
-  const [lines, setLines] = useState([]); // all messages
-  const [users, setUsers] = useState([]); // online user list
-  const [target, setTarget] = useState('global'); // 'global' or username
-  const terminalRef = useRef();
+  const [lines, setLines] = useState([]);
+  const [input, setInput] = useState("");
+  const termRef = useRef(null);
 
-  // scroll helper
-  function pushLine(obj) {
-    // obj: {kind:'message'|'private'|'system', html: '...' , meta...}
-    setLines((s)=>[...s, obj]);
-    setTimeout(()=>terminalRef.current?.scrollTo({top: terminalRef.current.scrollHeight, behavior:'smooth'}), 10);
-  }
+  useEffect(() => {
+    if (!socket) return;
+    socket.addEventListener("message", (event) => {
+      const msg = JSON.parse(event.data);
 
-  // send identify when socket available or when nick changes
-  useEffect(()=>{
-    if(!socket) return;
-    function tryIdentify() {
-      if(socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'identify', nick }));
+      if (msg.type === "message") {
+        appendLine(`<span class="nick">${msg.nick}:</span> ${escapeHtml(msg.text)}`);
       }
-    }
-    // identify now and when opened
-    tryIdentify();
-    socket.addEventListener('open', tryIdentify);
-    return ()=> socket.removeEventListener('open', tryIdentify);
-  }, [socket, nick]);
 
-  // incoming messages
-  useEffect(()=>{
-    if(!socket) return;
-    const handler = (ev) => {
-      try {
-        const payload = JSON.parse(ev.data);
-        if(payload.type === 'message' && payload.room === 'global') {
-          pushLine({ kind: 'message', html:`<b>${escapeHtml(payload.nick)}</b> ${new Date(payload.ts).toLocaleTimeString()}\\n${escapeHtml(payload.text)}`, meta: payload });
-        } else if (payload.type === 'private') {
-          // show private messages only if sender or recipient is me
-          const me = nick;
-          if (payload.nick === me || payload.to === me) {
-            pushLine({ kind: 'private', html:`<i>private</i> <b>${escapeHtml(payload.nick)}</b> -> <b>${escapeHtml(payload.to)}</b> ${new Date(payload.ts).toLocaleTimeString()}\\n${escapeHtml(payload.text)}`, meta: payload });
-          }
-        } else if (payload.type === 'system') {
-          pushLine({ kind: 'system', html:`<span class="meta">[system] ${escapeHtml(payload.text)}</span>`, meta: payload });
-        } else if (payload.type === 'presence') {
-          setUsers(payload.users || []);
-        }
-      } catch(e) {
-        pushLine({ kind:'system', html: '[raw] ' + ev.data });
+      else if (msg.type === "system") {
+        appendLine(`<span class="meta">[system]</span> ${escapeHtml(msg.text)}`);
       }
-    };
-    socket.addEventListener('message', handler);
-    return ()=> socket.removeEventListener('message', handler);
-  }, [socket, nick]);
 
-  function send(text) {
-    if(!text) return;
-    // support slash /msg user text or /pm user text
-    if(text.startsWith('/')) {
-      const [cmd, ...rest] = text.substring(1).split(/\s+/);
-      const restText = rest.join(' ');
-      if(cmd === 'msg' || cmd === 'pm') {
-        const to = rest.shift();
-        const msgText = rest.join(' ');
-        if(!to || !msgText) {
-          pushLine({ kind:'system', html: '[system] usage: /msg username message' });
-          return;
-        }
-        const payload = { type:'private', to, text: msgText, nick };
-        if(socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
-        else pushLine({ kind:'private', html: `<i>private</i> <b>${escapeHtml(nick)}</b> -> <b>${escapeHtml(to)}</b> ${new Date().toLocaleTimeString()}\\n${escapeHtml(msgText)}` });
-        return;
+      else if (msg.type === "history") {
+        msg.data.forEach((m) => {
+          if (m.type === "message")
+            appendLine(`<span class="nick">${m.nick}:</span> ${escapeHtml(m.text)}`);
+          else if (m.type === "system")
+            appendLine(`<span class="meta">[system]</span> ${escapeHtml(m.text)}`);
+        });
       }
-      if(cmd === 'global') {
-        setTarget('global');
-        pushLine({ kind:'system', html:'[system] switched to global chat' });
-        return;
+
+      else if (msg.type === "clear") {
+        setLines([]);
       }
-      // other commands fallback to normal message
-    }
-
-    // if target is a username => send private
-    if(target !== 'global') {
-      const payload = { type:'private', to: target, text, nick };
-      if(socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
-      else pushLine({ kind:'private', html:`<i>private</i> <b>${escapeHtml(nick)}</b> -> <b>${escapeHtml(target)}</b> ${new Date().toLocaleTimeString()}\\n${escapeHtml(text)}` });
-      return;
-    }
-
-    // else send global
-    const payload = { type:'message', text, nick };
-    if(socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
-    else pushLine({ kind:'message', html:`<b>${escapeHtml(nick)}</b> ${new Date().toLocaleTimeString()}\\n${escapeHtml(text)}` });
-  }
-
-  // filter lines to show: if target is global => show messages.kind === 'message' || system
-  // if target is username => show messages where private and involve that user (either from or to) OR system
-  function visibleLines() {
-    if(target === 'global') return lines.filter(l => l.kind === 'message' || l.kind === 'system');
-    return lines.filter(l => {
-      if(l.kind === 'system') return true;
-      if(l.kind === 'private') {
-        const meta = l.meta;
-        // meta.nick is sender, meta.to is recipient
-        return (meta.nick === target) || (meta.to === target) || (meta.nick === nick) || (meta.to === nick);
-      }
-      return false;
     });
-  }
+  }, [socket]);
+
+  const appendLine = (html) => {
+    setLines((prev) => [...prev, html].slice(-500));
+    setTimeout(() => {
+      if (termRef.current)
+        termRef.current.scrollTop = termRef.current.scrollHeight;
+    }, 50);
+  };
+
+  const sendCommand = (text) => {
+    if (!text.trim()) return;
+    if (text.startsWith("/")) {
+      const [cmd, ...args] = text.slice(1).split(" ");
+      handleCommand(cmd.toLowerCase(), args.join(" "));
+    } else if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "message", text, nick }));
+    }
+    setInput("");
+  };
+
+  const handleCommand = (cmd, args) => {
+    switch (cmd) {
+      case "nick":
+        if (!args) {
+          appendLine("<span class='meta'>Usage: /nick &lt;newName&gt;</span>");
+        } else {
+          const newNick = args.substring(0, 24);
+          socket.send(JSON.stringify({ type: "nick", oldNick: nick, newNick }));
+          setNick(newNick);
+          localStorage.setItem("nick", newNick);
+        }
+        break;
+
+      case "clear":
+        setLines([]);
+        socket.send(JSON.stringify({ type: "clear" }));
+        break;
+
+      default:
+        appendLine(`<span class='meta'>Unknown command: /${cmd}</span>`);
+    }
+  };
 
   return (
-    <div className="flex gap-4">
-      <div style={{flex:1}}>
-        <div ref={terminalRef} className="bg-[#020807] rounded p-3 min-h-[400px] max-h-[60vh] overflow-auto">
-          {visibleLines().map((l,i)=>(<div key={i} className="whitespace-pre-wrap text-sm" dangerouslySetInnerHTML={{__html:l.html}} />))}
-        </div>
-
-        <div className="flex items-center gap-3 mt-2">
-          <div className="text-sm">Chat:</div>
-          <button className={`px-2 py-1 rounded ${target==='global' ? 'bg-[#00140a] text-[#00ff6a]' : 'bg-[#071013]'}`} onClick={()=>setTarget('global')}>Global</button>
-          <div className="text-sm ml-4">Private with:</div>
-          <div style={{display:'flex', gap:8, overflowX:'auto', paddingLeft:8}}>
-            {users.filter(u => u !== nick).map(u=>(
-              <button key={u} onClick={()=>setTarget(u)} className={`px-2 py-1 rounded ${target===u ? 'bg-[#00140a] text-[#00ff6a]' : 'bg-[#071013]'}`}>{u}</button>
-            ))}
-          </div>
-          <div style={{marginLeft:'auto'}} className="text-sm">You: <b>{nick}</b></div>
-        </div>
-
-        <ChatInput onSend={send} />
+    <div>
+      <div
+        ref={termRef}
+        className="bg-black p-3 rounded h-[70vh] overflow-y-auto text-green-400 font-mono text-sm"
+      >
+        {lines.map((l, i) => (
+          <div key={i} dangerouslySetInnerHTML={{ __html: l }} />
+        ))}
       </div>
-
-      <aside style={{width:260}} className="bg-[#061010] p-3 rounded">
-        <div className="text-sm mb-2">Online users</div>
-        <div style={{display:'flex', flexDirection:'column', gap:6}}>
-          {users.map(u => (
-            <div key={u} style={{display:'flex', justifyContent:'space-between', alignItems:'center', padding:'6px', background: u===nick ? 'rgba(0,255,106,0.06)' : 'transparent'}} >
-              <div>{u}</div>
-              <div><button onClick={()=>setTarget(u)} className="px-2 py-1 rounded">Chat</button></div>
-            </div>
-          ))}
-        </div>
-      </aside>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          sendCommand(input);
+        }}
+        className="flex gap-2 mt-2"
+      >
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          className="flex-1 bg-[#0a0a0a] text-green-400 border border-green-700 rounded p-2"
+          placeholder="Type message or /help"
+        />
+      </form>
     </div>
   );
+}
+
+function escapeHtml(unsafe) {
+  return unsafe.replace(/[&<"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", '"': "&quot;", "'": "&#039;" }[m]));
 }
