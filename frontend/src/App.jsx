@@ -1,20 +1,40 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect } from 'react'
 import TerminalUI from './components/TerminalUI'
 
-export default function App(){
-  const [nick, setNick] = useState('guest');
-  const [ws, setWs] = useState(null);
+export default function App() {
+  const [nick, setNick] = useState('guest')
+  const [ws, setWs] = useState(null)
 
-  useEffect(()=>{
-    // open WSS connection
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${location.hostname}:3000`;
-    const socket = new WebSocket(url);
-    socket.addEventListener('open', ()=> console.log('ws open'));
-    socket.addEventListener('error', (e)=> console.warn('ws error', e));
-    setWs(socket);
-    return ()=> socket.close();
-  },[]);
+  useEffect(() => {
+    // Safeguard for SSR environments
+    if (typeof window === 'undefined') return
+
+    // Build backend base from env var or fallback to localhost
+    const backendBase = import.meta.env.VITE_BACKEND_URL || `${location.protocol}//${location.hostname}:3000`
+    const backend = backendBase.replace(/\/$/, '') // remove trailing slash
+    const wsUrl = backend.replace(/^http/, 'ws')   // http(s) -> ws(s)
+
+    const socket = new WebSocket(wsUrl)
+
+    const handleOpen = () => console.log('ws open', wsUrl)
+    const handleError = (ev) => console.warn('ws error', ev)
+    const handleClose = (ev) => console.log('ws closed', ev)
+
+    socket.addEventListener('open', handleOpen)
+    socket.addEventListener('error', handleError)
+    socket.addEventListener('close', handleClose)
+
+    setWs(socket)
+
+    // Cleanup on unmount
+    return () => {
+      socket.removeEventListener('open', handleOpen)
+      socket.removeEventListener('error', handleError)
+      socket.removeEventListener('close', handleClose)
+      try { socket.close() } catch (e) { /* ignore */ }
+      setWs(null)
+    }
+  }, []) // run once
 
   return (
     <div className="min-h-screen bg-[#071013] text-[#9db0a5] p-6 font-mono">
@@ -27,10 +47,5 @@ export default function App(){
         <TerminalUI socket={ws} nick={nick} setNick={setNick} />
       </div>
     </div>
-    // inside App.jsx useEffect
-const backendBase = import.meta.env.VITE_BACKEND_URL || `${location.protocol}//${location.hostname}:3000`;
-const backend = backendBase.replace(/\/$/, '');
-const wsUrl = backend.replace(/^http/, 'ws');
-const socket = new WebSocket(wsUrl);
   )
 }
