@@ -1,41 +1,45 @@
 import React, { useState, useEffect, useRef } from "react";
 
-export default function TerminalUI({ socket, nick, setNick, isAdmin }) {
+export default function TerminalUI({ socket, nick, setNick }) {
   const terminalRef = useRef(null);
-  const inputRef = useRef(null);
   const [lines, setLines] = useState([]);
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  // Append message to terminal
-  const appendLine = (html) => {
-    setLines((prev) => [...prev, html]);
-  };
-
-  // Scroll down when new messages appear
+  // Restore nick from localStorage
   useEffect(() => {
-    const el = terminalRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [lines]);
+    const savedNick = localStorage.getItem("nick");
+    if (savedNick && savedNick !== nick) {
+      setNick(savedNick);
+      socket?.send(JSON.stringify({ type: "nick", newNick: savedNick }));
+    }
+  }, [socket]);
 
-  // Listen for messages from WebSocket
+  const appendLine = (html) => setLines((prev) => [...prev, html]);
+  const escapeHtml = (str) =>
+    str.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // Listen for WS messages
   useEffect(() => {
     if (!socket) return;
     const onMsg = (e) => {
       try {
         const msg = JSON.parse(e.data);
         if (msg.type === "message") {
-          appendLine(
-            `<span class="nick">${msg.nick}</span>: ${escapeHtml(msg.text)}`
-          );
+          appendLine(`<span class='nick'>${msg.nick}</span>: ${escapeHtml(msg.text)}`);
         } else if (msg.type === "system") {
-          appendLine(`<span class="meta">[system]</span> ${escapeHtml(msg.text)}`);
+          appendLine(`<span class='meta'>[system]</span> ${escapeHtml(msg.text)}`);
+        } else if (msg.type === "private") {
+          appendLine(
+            `<span class='meta'>(private)</span> <span class='nick'>${msg.from}</span> → <span class='nick'>${msg.to}</span>: ${escapeHtml(msg.text)}`
+          );
         } else if (msg.type === "history") {
           msg.history.forEach((m) =>
-            appendLine(
-              `<span class="nick">${m.nick}</span>: ${escapeHtml(m.text)}`
-            )
+            appendLine(`<span class='nick'>${m.nick}</span>: ${escapeHtml(m.text)}`)
           );
         } else if (msg.type === "clear") {
           setLines([]);
+        } else if (msg.type === "admin-status") {
+          setIsAdmin(msg.value);
         }
       } catch {}
     };
@@ -43,61 +47,68 @@ export default function TerminalUI({ socket, nick, setNick, isAdmin }) {
     return () => socket.removeEventListener("message", onMsg);
   }, [socket]);
 
-  const escapeHtml = (str) =>
-    str.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
-  const handleCommand = (cmdline) => {
-    const [cmd, ...rest] = cmdline.trim().substring(1).split(/\s+/);
+  const handleCommand = (line) => {
+    const [cmd, ...rest] = line.trim().substring(1).split(/\s+/);
     const args = rest.join(" ");
 
     switch (cmd) {
       case "help":
         appendLine(
-          `<span class="meta">Available commands: /help, /nick &lt;name&gt;, /me &lt;action&gt;, /login &lt;key&gt;, /logout, /clear</span>`
+          `<span class='meta'>Commands: /help, /nick <name>, /me <action>, /msg <user> <text>, /login <key>, /logout, /clear</span>`
         );
         break;
 
       case "nick":
-        if (!args) return appendLine("<span class='meta'>Usage: /nick &lt;name&gt;</span>");
-        setNick(args.substring(0, 24));
+        if (!args) return appendLine("<span class='meta'>Usage: /nick <name></span>");
+        setNick(args);
         localStorage.setItem("nick", args);
         socket.send(JSON.stringify({ type: "nick", newNick: args }));
-        appendLine(`<span class="meta">Nickname changed to ${args}</span>`);
+        appendLine(`<span class='meta'>Nickname changed to ${args}</span>`);
         break;
 
+      case "me":
+        if (!args) return appendLine("<span class='meta'>Usage: /me <action></span>");
+        socket.send(JSON.stringify({ type: "message", text: `* ${nick} ${args}` }));
+        break;
+
+      case "msg": {
+        const [to, ...textParts] = rest;
+        const text = textParts.join(" ");
+        if (!to || !text)
+          return appendLine("<span class='meta'>Usage: /msg <user> <text></span>");
+        socket.send(JSON.stringify({ type: "private", to, text }));
+        appendLine(`<span class='meta'>(to ${to})</span> ${escapeHtml(text)}`);
+        break;
+      }
+
       case "login":
-        if (!args) return appendLine("<span class='meta'>Usage: /login &lt;key&gt;</span>");
+        if (!args) return appendLine("<span class='meta'>Usage: /login <key></span>");
         socket.send(JSON.stringify({ type: "login", key: args }));
         break;
 
       case "logout":
         socket.send(JSON.stringify({ type: "logout" }));
+        setIsAdmin(false);
         appendLine("<span class='meta'>Logged out of admin mode.</span>");
         break;
 
-      case "me":
-        if (!args) return appendLine("<span class='meta'>Usage: /me &lt;action&gt;</span>");
-        socket.send(JSON.stringify({ type: "message", nick, text: `* ${nick} ${args}` }));
-        break;
-
       case "clear":
-        if (isAdmin) {
-          socket.send(JSON.stringify({ type: "clear" }));
-        } else {
+        if (isAdmin) socket.send(JSON.stringify({ type: "clear" }));
+        else {
           appendLine("<span class='meta'>(local) chat cleared.</span>");
           setLines([]);
         }
         break;
 
       default:
-        appendLine(`<span class="meta">Unknown command: /${cmd}</span>`);
+        appendLine(`<span class='meta'>Unknown command: /${cmd}</span>`);
     }
   };
 
   const handleSend = (value) => {
     if (!value) return;
-    if (value.startsWith("/")) return handleCommand(value);
-    socket.send(JSON.stringify({ type: "message", nick, text: value }));
+    if (value.startsWith("/")) handleCommand(value);
+    else socket.send(JSON.stringify({ type: "message", text: value }));
   };
 
   return (
@@ -110,20 +121,17 @@ export default function TerminalUI({ socket, nick, setNick, isAdmin }) {
           <div key={i} dangerouslySetInnerHTML={{ __html: line }} />
         ))}
       </div>
-      <div className="flex gap-2 mt-3">
-        <input
-          ref={inputRef}
-          type="text"
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              handleSend(e.target.value);
-              e.target.value = "";
-            }
-          }}
-          className="flex-1 bg-[#020807] border border-[#004d2b] rounded p-2 text-[#cfeedd]"
-          placeholder="Type a message or command (/help)"
-        />
-      </div>
+      <input
+        type="text"
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            handleSend(e.target.value);
+            e.target.value = "";
+          }
+        }}
+        className="w-full mt-2 bg-[#020807] border border-[#004d2b] rounded p-2 text-[#cfeedd]"
+        placeholder="Type a message or /help"
+      />
     </div>
   );
 }
