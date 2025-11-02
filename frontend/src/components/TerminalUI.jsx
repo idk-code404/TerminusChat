@@ -10,7 +10,13 @@ export default function TerminalUI({ socket, nick, setNick }) {
     socket.addEventListener("message", (event) => {
       const msg = JSON.parse(event.data);
 
-      if (msg.type === "message") {
+      if (msg.type === "nick-assign") {
+        setNick(msg.nick);
+        localStorage.setItem("nick", msg.nick);
+        localStorage.setItem("clientId", msg.id);
+      }
+
+      else if (msg.type === "message") {
         appendLine(`<span class="nick">${msg.nick}:</span> ${escapeHtml(msg.text)}`);
       }
 
@@ -45,7 +51,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     if (!text.trim()) return;
     if (text.startsWith("/")) {
       const [cmd, ...args] = text.slice(1).split(" ");
-      handleCommand(cmd.toLowerCase(), args.join(" "));
+      handleCommand(cmd.toLowerCase(), args);
     } else if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "message", text, nick }));
     }
@@ -54,20 +60,29 @@ export default function TerminalUI({ socket, nick, setNick }) {
 
   const handleCommand = (cmd, args) => {
     switch (cmd) {
-      case "nick":
-        if (!args) {
+      case "nick": {
+        const newNick = args.join(" ").substring(0, 24);
+        if (!newNick) {
           appendLine("<span class='meta'>Usage: /nick &lt;newName&gt;</span>");
-        } else {
-          const newNick = args.substring(0, 24);
-          socket.send(JSON.stringify({ type: "nick", oldNick: nick, newNick }));
-          setNick(newNick);
-          localStorage.setItem("nick", newNick);
+          return;
         }
+        socket.send(JSON.stringify({ type: "nick", newNick }));
+        setNick(newNick);
+        localStorage.setItem("nick", newNick);
         break;
+      }
 
-      case "clear":
-        setLines([]);
-        socket.send(JSON.stringify({ type: "clear" }));
+      case "clear": {
+        const key = args[0] || "";
+        if (key)
+          socket.send(JSON.stringify({ type: "clear", key }));
+        else
+          setLines([]);
+        break;
+      }
+
+      case "help":
+        appendLine("<span class='meta'>Commands: /nick &lt;name&gt;, /clear [admin-key], /help</span>");
         break;
 
       default:
