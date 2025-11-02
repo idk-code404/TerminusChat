@@ -1,59 +1,78 @@
-## Prepare for GitHub
+TerminusChat
 
-This repository is prepared to be pushed to GitHub. To create a remote repository and push the code, run:
+TerminusChat is a terminal-style chat application with global chat, private messaging, and admin controls. It supports a retro terminal aesthetic and real-time messaging with persistent usernames.
 
-```bash
-# initialize git and push (run from project root)
-git init
-git add .
-git commit -m "Initial commit — TerminusChat"
-# create repo on GitHub (use gh CLI) or create manually on GitHub website
-# using GitHub CLI (optional):
-#   gh repo create your-username/terminuschat --public --source=. --remote=origin --push
-# or add a remote manually and push:
-git remote add origin git@github.com:YOUR_USERNAME/terminuschat.git
-git branch -M main
-git push -u origin main
-```
+Features
 
-The project includes a GitHub Actions workflow at `.github/workflows/ci.yml` that installs dependencies and builds the frontend on push/pull requests to `main` or `master`.
+Global chat with real-time messaging
 
----
-# TerminusChat
+Private messages (/msg <user> <message>)
 
-A terminal-style realtime chat app (React + Tailwind + Node.js WebSocket).
+Per-user unread PM counters and notifications
 
-## Local dev (requires Node.js >=16)
+Click username to start a private message automatically
 
-1. Install root deps and run both apps:
+Admin system (/login <key> / /logout)
 
-   npm install
-   npm run dev
+Secure global /clear command for admins only
 
-This runs the backend on http://localhost:3000 and frontend on http://localhost:5173.
+Persistent nicknames stored in usernames.json
 
-## Production
+LocalStorage restores nickname on reconnect
 
-Build frontend, serve static files from backend, run behind an HTTPS reverse proxy (Nginx / CloudLoadBalancer).
+User list panel showing online users and admin status
 
-## Security
-- Use HTTPS/WSS in production.
-- Replace in-memory stores with a real DB and Redis for pub/sub.
-- Implement proper input validation & sanitization server-side.
-- Use environment variables for secrets and JWT keys.
-- Add rate limiting and file scanning for uploads.
+Commands
+Command	Description
+/help	Show available commands
+/nick <name>	Change your nickname
+/me <action>	Send an action message
+/msg <user> <text>	Send a private message
+/login <key>	Log in as admin
+/logout	Log out of admin
+/clear	Clear chat (admins can clear globally)
+Installation
+
+Clone the repository:
+
+git clone https://github.com/yourusername/terminus-chat.git
+cd terminus-chat
 
 
-## Docker Compose (production-like)
+Install dependencies for the server:
 
-A docker-compose is included. To build and run:
+npm install ws
 
-```
-docker compose build
-sudo docker compose up
-```
 
-- Frontend: http://localhost:8080
-- Backend API / WS: http://localhost:3000 and ws://localhost:3000
+Create an usernames.json file in the root directory:
 
-Note: In production, put a reverse proxy (Nginx) in front for TLS, configure JWT_SECRET and other secrets via environment variables, and use a proper database and redis for pub/sub.
+echo "{}" > usernames.json
+
+
+(Optional) Set an admin key:
+
+export ADMIN_KEY="your-secret-key"
+
+Running
+Start the WebSocket server
+node server.js
+
+
+The server runs on port 3000 by default. You can change the port by setting the PORT environment variable.
+
+Frontend
+
+Use React (Vite or Create React App) to serve the frontend. Make sure TerminalUI.jsx and App.jsx are in place.
+
+npm run dev
+
+
+Or deploy to Vercel for the frontend and Render for the WebSocket server.
+
+Notes
+
+PM notifications will flash the document title and play a sound (notification.mp3) when receiving private messages.
+
+Usernames persist across reconnects via usernames.json and LocalStorage.
+
+Only authorized admins can clear global chat using /clear.
