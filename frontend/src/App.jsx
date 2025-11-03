@@ -13,6 +13,7 @@ function getCookie(name) {
 }
 
 export default function App() {
+  // Load nickname from cookie or localStorage
   const initialNick = (() => {
     if (typeof window === 'undefined') return '';
     const cookieName = getCookie('terminus_nick');
@@ -23,6 +24,7 @@ export default function App() {
   const [nick, setNick] = useState(initialNick);
   const [ws, setWs] = useState(null);
 
+  // Ask user for nickname if not set
   useEffect(() => {
     if (!nick) {
       let name = '';
@@ -35,57 +37,51 @@ export default function App() {
     }
   }, [nick]);
 
+  // Connect to WebSocket server
   useEffect(() => {
     if (!nick) return;
+
     const backendBase = import.meta.env.VITE_BACKEND_URL || `${location.protocol}//${location.hostname}:3000`;
     const backend = backendBase.replace(/\/$/, '');
     const wsUrl = backend.replace(/^http/, 'ws');
 
     const socket = new WebSocket(wsUrl);
 
-    const onOpen = () => {
+    socket.addEventListener('open', () => {
       console.log('WebSocket connected to', wsUrl);
-      try { socket.send(JSON.stringify({ type: 'nick', newNick: nick })); } catch {}
-    };
-    const onError = (e) => console.warn('WebSocket error', e);
-    const onClose = () => console.log('WebSocket closed');
+      // Just send the nick to server — no local "[system]" echo
+      socket.send(JSON.stringify({ type: 'nick', newNick: nick }));
+    });
 
-    socket.addEventListener('open', onOpen);
-    socket.addEventListener('error', onError);
-    socket.addEventListener('close', onClose);
+    socket.addEventListener('error', (e) => console.warn('WebSocket error', e));
+    socket.addEventListener('close', () => console.log('WebSocket closed'));
 
     setWs(socket);
-
     return () => {
-      socket.removeEventListener('open', onOpen);
-      socket.removeEventListener('error', onError);
-      socket.removeEventListener('close', onClose);
       try { socket.close(); } catch {}
       setWs(null);
     };
   }, [nick]);
 
+  // Persist nick and sync with server
   const persistNick = (newNick) => {
     setNick(newNick);
-    try { localStorage.setItem('nick', newNick); } catch {}
-    try { setCookie('terminus_nick', newNick, 365); } catch {}
+    localStorage.setItem('nick', newNick);
+    setCookie('terminus_nick', newNick, 365);
     if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: 'nick', newNick })); } catch {}
+      ws.send(JSON.stringify({ type: 'nick', newNick }));
     }
   };
 
   return (
-    <div className="min-h-screen bg-[#071013] text-[#9db0a5] p-6 font-mono">
-      <div className="max-w-6xl mx-auto">
-        {/* Header removed as requested — App renders TerminalUI immediately */}
-        {nick && ws && (
-          <TerminalUI
-            socket={ws}
-            nick={nick}
-            setNick={persistNick}
-          />
-        )}
-      </div>
+    <div className="min-h-screen bg-[#071013] text-[#9db0a5] font-mono flex flex-col">
+      {nick && ws && (
+        <TerminalUI
+          socket={ws}
+          nick={nick}
+          setNick={persistNick}
+        />
+      )}
     </div>
   );
 }
