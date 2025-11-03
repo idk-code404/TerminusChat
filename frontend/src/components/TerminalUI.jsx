@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-// sound for PM notifications
-const pingSound = new Audio('/ping.mp3'); // optional: add this to /public
+// optional sound for private messages (put ping.mp3 in /public)
+const pingSound = new Audio('/ping.mp3');
 
 export default function TerminalUI({ socket, nick, setNick }) {
   const [messages, setMessages] = useState([]);
@@ -37,13 +37,13 @@ export default function TerminalUI({ socket, nick, setNick }) {
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  // Auto scroll
+  // Auto scroll chat
   useEffect(() => {
     if (chatRef.current)
       chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
 
-  // WebSocket events
+  // Handle incoming WebSocket messages
   useEffect(() => {
     if (!socket) return;
 
@@ -55,17 +55,14 @@ export default function TerminalUI({ socket, nick, setNick }) {
         return;
       }
 
-      if (data.type === 'message' || data.type === 'system' || data.type === 'pm') {
+      if (['message', 'system', 'pm'].includes(data.type)) {
         setMessages((prev) => [...prev, data]);
         if (data.type === 'pm' && data.to === nick) {
-          // add unread count
           setUnreadPM((prev) => ({
             ...prev,
             [data.from]: (prev[data.from] || 0) + 1,
           }));
-          try {
-            pingSound.play().catch(() => {});
-          } catch {}
+          try { pingSound.play().catch(() => {}); } catch {}
         }
       }
 
@@ -78,11 +75,32 @@ export default function TerminalUI({ socket, nick, setNick }) {
     return () => socket.removeEventListener('message', handleMessage);
   }, [socket, nick]);
 
+  // Send command
   const sendCommand = (cmdline) => {
     const [cmd, ...args] = cmdline.slice(1).split(' ');
     const argStr = args.join(' ');
 
     switch (cmd) {
+      case 'help':
+        addLocalMessage(
+          `[system] Available commands:\n` +
+          `/help - show this message\n` +
+          `/commands - list commands\n` +
+          `/nick <name> - change nickname\n` +
+          `/theme <green|dark|light> - change theme\n` +
+          `/msg <user> <message> - send private message\n` +
+          `/login <key> - admin login\n` +
+          `/logout - admin logout\n` +
+          `/clear - clear chat (admin can clear global)`
+        );
+        break;
+
+      case 'commands':
+        addLocalMessage(
+          `[system] Commands: /help, /commands, /nick, /theme, /msg, /login, /logout, /clear`
+        );
+        break;
+
       case 'theme':
         if (['light', 'dark', 'green'].includes(argStr)) setTheme(argStr);
         addLocalMessage(`[system] Theme changed to ${argStr}`);
@@ -138,31 +156,21 @@ export default function TerminalUI({ socket, nick, setNick }) {
   const handleUserClick = (username) => {
     setInput(`/msg ${username} `);
     inputRef.current?.focus();
+    setUnreadPM((prev) => ({ ...prev, [username]: 0 })); // reset unread
   };
 
   const formatTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   return (
-    <div
-      className="flex flex-col flex-1 h-[100dvh] w-full overflow-hidden"
-      style={{
-        background: 'var(--bg)',
-        color: 'var(--text)',
-      }}
-    >
-      {/* Main layout */}
+    <div className="flex flex-col flex-1 h-[100dvh] w-full overflow-hidden" style={{ background: 'var(--bg)', color: 'var(--text)' }}>
       <div className="flex flex-1 overflow-hidden sm:flex-row flex-col gap-2 sm:gap-4">
         
-        {/* Chat section */}
+        {/* Chat area */}
         <div className="flex flex-col flex-1 overflow-hidden rounded-lg border border-gray-800 bg-[rgba(0,0,0,0.25)]">
           <div
             ref={chatRef}
             className="flex-1 overflow-y-auto px-3 py-2 sm:p-4 text-sm sm:text-base"
-            style={{
-              scrollBehavior: 'smooth',
-              wordBreak: 'break-word',
-              overscrollBehavior: 'contain',
-            }}
+            style={{ scrollBehavior: 'smooth', wordBreak: 'break-word', overscrollBehavior: 'contain' }}
           >
             {messages.map((msg, i) => (
               <div key={i} className="mb-1 leading-snug">
@@ -194,7 +202,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
             ))}
           </div>
 
-          {/* Input row */}
+          {/* Input */}
           <div className="flex items-center gap-2 p-2 sm:p-3 border-t border-gray-700 bg-[rgba(0,0,0,0.35)]">
             <input
               ref={inputRef}
@@ -208,12 +216,8 @@ export default function TerminalUI({ socket, nick, setNick }) {
               enterKeyHint="send"
             />
             <button
-              className="px-3 py-2 rounded-md text-sm sm:text-base"
-              style={{
-                background: 'var(--accent)',
-                color: '#000',
-                fontWeight: 600,
-              }}
+              className="px-3 py-2 rounded-md text-sm sm:text-base font-semibold"
+              style={{ background: 'var(--accent)', color: '#000' }}
               onClick={sendMessage}
             >
               Send
@@ -221,7 +225,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
           </div>
         </div>
 
-        {/* Sidebar: Users */}
+        {/* Sidebar */}
         <aside className="sm:w-64 w-full sm:max-w-none flex-shrink-0 overflow-y-auto rounded-lg border border-gray-800 bg-[rgba(0,0,0,0.25)] p-3">
           <div className="mb-2 text-[var(--accent)] font-semibold">Online Users</div>
           <div className="flex flex-wrap sm:flex-col gap-2 sm:gap-1">
