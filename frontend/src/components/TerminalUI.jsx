@@ -3,6 +3,8 @@ import React, { useState, useEffect, useRef } from 'react';
 const pingSound = new Audio('/ping.mp3');
 
 export default function TerminalUI({ socket, nick, setNick }) {
+  // Load nickname from localStorage or fallback
+  const savedNick = localStorage.getItem('nickname') || nick || `guest${Math.floor(Math.random() * 1000)}`;
   const [messages, setMessages] = useState([]);
   const [users, setUsers] = useState({});
   const [unreadPM, setUnreadPM] = useState({});
@@ -36,6 +38,15 @@ export default function TerminalUI({ socket, nick, setNick }) {
     localStorage.setItem('theme', theme);
   }, [theme]);
 
+  // Restore saved nickname on load
+  useEffect(() => {
+    setNick(savedNick);
+    localStorage.setItem('nickname', savedNick);
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'nick', nick: savedNick }));
+    }
+  }, [socket]);
+
   // Scroll chat to bottom
   useEffect(() => {
     if (chatRef.current)
@@ -60,7 +71,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
           break;
         case 'pm':
           setMessages((prev) => [...prev, data]);
-          if (data.to === nick) {
+          if (data.to === savedNick) {
             setUnreadPM((prev) => ({ ...prev, [data.from]: (prev[data.from] || 0) + 1 }));
             try { pingSound.play().catch(() => {}); } catch {}
           }
@@ -83,7 +94,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
 
     socket.addEventListener('message', handleMessage);
     return () => socket.removeEventListener('message', handleMessage);
-  }, [socket, nick]);
+  }, [socket]);
 
   const formatTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -144,6 +155,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
       case 'nick':
         if (!argStr) return addLocalMessage(`[system] Usage: /nick <name>`);
         setNick(argStr);
+        localStorage.setItem('nickname', argStr); // save nickname
         socket.send(JSON.stringify({ type: 'nick', nick: argStr }));
         addLocalMessage(`[system] Your nickname is now ${argStr}`);
         break;
@@ -184,7 +196,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
                 {msg.type === 'pm' && (
                   <span>
                     <span className="text-[var(--accent)] font-semibold">
-                      [PM] {msg.from === nick ? `→ ${msg.to}` : `${msg.from} → you`}
+                      [PM] {msg.from === savedNick ? `→ ${msg.to}` : `${msg.from} → you`}
                     </span>: {msg.text}
                   </span>
                 )}
@@ -216,7 +228,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
             {Object.keys(users).length === 0 && (<div className="text-gray-500 text-sm">No users</div>)}
             {Object.entries(users).map(([username, data]) => (
               <div key={username} onClick={() => handleUserClick(username)} className="cursor-pointer flex items-center justify-between rounded-md px-2 py-1 hover:bg-[rgba(255,255,255,0.05)]">
-                <span style={{ color: data.admin ? 'gold' : 'var(--text)' }}>{username === nick ? `${username} (you)` : username}</span>
+                <span style={{ color: data.admin ? 'gold' : 'var(--text)' }}>{username === savedNick ? `${username} (you)` : username}</span>
                 {unreadPM[username] && (<span className="text-xs bg-[var(--accent)] text-black rounded-full px-2 py-0.5 font-bold">{unreadPM[username]}</span>)}
               </div>
             ))}
