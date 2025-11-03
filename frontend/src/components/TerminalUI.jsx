@@ -1,12 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
 
 /**
- * TerminalUI — Sidebar auto-only (no show/hide button), responsive + themes + PMs + unread counters + click-to-PM.
+ * TerminalUI — header-free version
  *
  * Props:
  *  - socket: WebSocket instance
  *  - nick: current nickname
  *  - setNick: function(newNick)
+ *
+ * Notes:
+ *  - This component no longer looks for a page <header/>; it sizes to the viewport.
+ *  - Sidebar auto-opens on wide viewports and auto-closes on narrow viewports.
+ *  - On mobile the input row is fixed to the bottom for better UX.
  */
 export default function TerminalUI({ socket, nick, setNick }) {
   const wrapperRef = useRef(null);
@@ -18,20 +23,20 @@ export default function TerminalUI({ socket, nick, setNick }) {
   const [unreadPMs, setUnreadPMs] = useState({});
   const [isAdmin, setIsAdmin] = useState(false);
 
-  // sidebar open default: open on desktop, closed on mobile
+  // Sidebar: open on desktop, closed on mobile
   const isClient = typeof window !== "undefined";
   const [sidebarOpen, setSidebarOpen] = useState(() => (isClient ? window.innerWidth > 960 : true));
   const [mobileInputFixed, setMobileInputFixed] = useState(() => (isClient ? window.innerWidth <= 640 : false));
   const pmSoundRef = useRef(null);
 
-  // inject styles once
+  // Inject essential styles (no header dependency)
   useEffect(() => {
-    const ID = "terminusui-no-toggle-styles";
+    const ID = "terminusui-headerless-styles";
     if (document.getElementById(ID)) return;
     const style = document.createElement("style");
     style.id = ID;
     style.innerHTML = `
-/* Layout */
+/* Basic layout */
 .tc-wrapper { display:flex; gap:16px; align-items:stretch; width:100%; box-sizing:border-box; padding:8px; }
 .tc-main { flex:1; display:flex; flex-direction:column; min-width:0; }
 .tc-terminal { flex:1; overflow:auto; border-radius:8px; padding:14px; box-sizing:border-box; transition: background 200ms, color 200ms; }
@@ -41,7 +46,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
 
 /* Sidebar and animation */
 .tc-sidebar { width:260px; min-width:200px; border-radius:8px; padding:12px; box-sizing:border-box; display:flex; flex-direction:column; gap:12px; transition: transform 220ms ease, opacity 220ms ease; transform: translateX(0); opacity:1; will-change:transform,opacity; position:relative; }
-.tc-sidebar.closed { transform: translateX(14px) scale(0.98); opacity:0; pointer-events:none; }
+.tc-sidebar.closed { transform: translateX(12px) scale(0.98); opacity:0; pointer-events:none; }
 
 /* user row */
 .tc-user-row { display:flex; justify-content:space-between; align-items:center; padding:6px 8px; border-radius:6px; cursor:pointer; transition: background 120ms; }
@@ -51,10 +56,10 @@ export default function TerminalUI({ socket, nick, setNick }) {
 /* Input fixed on mobile */
 @media (max-width:640px){
   .tc-wrapper { gap:10px; }
-  .tc-sidebar { position: absolute; right: 12px; top: 88px; z-index:80; box-shadow: 0 12px 30px rgba(0,0,0,0.5); }
-  .tc-sidebar.closed { display:block; } /* keep for animation; pointer-events:none prevents clicks */
+  .tc-sidebar { position: absolute; right: 12px; top: 12px; z-index:80; box-shadow: 0 12px 30px rgba(0,0,0,0.5); }
+  .tc-sidebar.closed { display:block; } /* allow animation; pointer-events:none prevents clicks */
   .tc-input-row.mobile-fixed { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index:90; background: transparent; padding: 8px 0; }
-  .tc-main { padding-bottom: 84px; }
+  .tc-main { padding-bottom: 84px; } /* space for fixed input */
 }
 
 /* theme vars (defaults) */
@@ -73,20 +78,18 @@ export default function TerminalUI({ socket, nick, setNick }) {
     document.head.appendChild(style);
   }, []);
 
-  // auto-fit wrapper height by measuring header
+  // auto-fit wrapper height using viewport only (no header)
   useEffect(() => {
     function updateHeight() {
-      const header = document.querySelector("header");
-      const headerH = header ? header.getBoundingClientRect().height : 120;
-      const padding = 28;
-      const newH = Math.max(220, window.innerHeight - headerH - padding);
+      const padding = 24; // small safe margin
+      const newH = Math.max(220, window.innerHeight - padding);
       if (wrapperRef.current) wrapperRef.current.style.height = `${newH}px`;
 
       setMobileInputFixed(window.innerWidth <= 640);
-      // auto-open/close sidebar depending on width (no manual toggle)
       if (window.innerWidth > 960) setSidebarOpen(true);
       else setSidebarOpen(false);
     }
+
     updateHeight();
     window.addEventListener("resize", updateHeight);
     window.addEventListener("orientationchange", updateHeight);
@@ -96,7 +99,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     };
   }, []);
 
-  // load pm sound
+  // load PM sound (optional)
   useEffect(() => {
     try {
       pmSoundRef.current = new Audio("/notification.mp3");
@@ -106,7 +109,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     }
   }, []);
 
-  // websocket message handling
+  // WebSocket message handling
   useEffect(() => {
     if (!socket) return;
     const onMsg = (ev) => {
@@ -154,7 +157,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     return () => socket.removeEventListener("message", onMsg);
   }, [socket, nick]);
 
-  // send nick when socket opens
+  // send nick on socket open
   useEffect(() => {
     if (!socket) return;
     const onOpen = () => {
@@ -224,7 +227,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     try { socket && socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: "message", text: value })); } catch { appendLine(`<span class="meta">Failed to send message (socket closed).</span>`); }
   };
 
-  // click user -> prefill /msg and clear unread
+  // clicking user fills /msg and clears unread count for that user
   const handleClickUser = (username) => {
     if (!inputRef.current) return;
     inputRef.current.value = `/msg ${username} `;
@@ -236,7 +239,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     });
   };
 
-  // theme apply helper
+  // theme helper (class-based)
   const applyThemeClass = (theme) => {
     const root = document.documentElement;
     root.classList.remove("theme-white", "theme-solar");
@@ -245,14 +248,19 @@ export default function TerminalUI({ socket, nick, setNick }) {
     localStorage.setItem("theme", theme);
   };
 
-  // classes and mobile input
   const sidebarClass = sidebarOpen ? "tc-sidebar" : "tc-sidebar closed";
   const inputRowClass = mobileInputFixed ? "tc-input-row mobile-fixed" : "tc-input-row";
 
+  // apply persisted theme on mount
+  useEffect(() => {
+    const t = localStorage.getItem("theme") || "green";
+    applyThemeClass(t);
+  }, []);
+
   return (
-    <div ref={wrapperRef} className="tc-wrapper">
+    <div ref={wrapperRef} className="tc-wrapper" style={{ position: "relative" }}>
       {/* Main chat */}
-      <div className="tc-main" style={{ minHeight: 0 }}>
+      <div className="tc-main">
         <div ref={terminalRef} className="tc-terminal" role="log" aria-live="polite">
           {lines.map((l, i) => (
             <div key={i} className="whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: l }} />
