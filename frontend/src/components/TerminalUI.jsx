@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 
 /**
- * TerminalUI (theme fix + PMs + user list + unread counters + click-to-PM)
+ * TerminalUI — Responsive + cleaner themes + PMs + user list + unread counters + click-to-PM
+ *
  * Props:
  *  - socket: WebSocket instance
  *  - nick: current nickname
@@ -14,9 +15,57 @@ export default function TerminalUI({ socket, nick, setNick }) {
   const [users, setUsers] = useState([]);
   const [unreadPMs, setUnreadPMs] = useState({});
   const [isAdmin, setIsAdmin] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const pmSound = useRef(null);
+  const STYLE_ID = "terminuschat-theme-styles-v2";
 
-  // Load PM sound (optional)
+  // inject CSS once (component-level styles + theme variables classes)
+  useEffect(() => {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.innerHTML = `
+/* Base layout */
+.tc-wrapper{ display:flex; gap:16px; align-items:stretch; height: calc(100vh - 120px); min-height:400px; }
+.tc-main{ flex:1; display:flex; flex-direction:column; min-width:0; }
+.tc-terminal{ flex:1; overflow:auto; border-radius:8px; padding:14px; box-sizing:border-box; transition: background 250ms, color 250ms; }
+.tc-input-row{ display:flex; gap:8px; margin-top:12px; }
+.tc-input{ flex:1; border-radius:8px; padding:10px 12px; font-family:inherit; font-size:14px; outline:none; box-sizing:border-box; transition: background 200ms, color 200ms, border 200ms; }
+.tc-send{ border-radius:8px; padding:10px 14px; cursor:pointer; border:none; font-weight:600; }
+.tc-sidebar{ width:260px; min-width:200px; border-radius:8px; padding:12px; box-sizing:border-box; transition: background 250ms, color 250ms; display:flex; flex-direction:column; gap:12px; }
+.tc-user-row{ display:flex; justify-content:space-between; align-items:center; padding:6px 8px; border-radius:6px; cursor:pointer; transition: background 120ms; }
+.tc-user-row:hover{ filter:brightness(1.05); }
+.tc-unread-badge{ background: #e11; color:#fff; padding:2px 7px; border-radius:999px; font-size:12px; }
+.tc-meta{ font-size:13px; color:var(--muted) }
+
+/* responsive */
+@media (max-width:960px){
+  .tc-wrapper{ gap:12px; height: calc(100vh - 140px); }
+  .tc-sidebar{ position: absolute; right: 12px; top: 88px; z-index:40; box-shadow:0 10px 30px rgba(0,0,0,0.6); }
+  .tc-sidebar.closed{ display:none; }
+}
+
+/* theme classes (clean, central) */
+:root { --accent: #00ff6a; --muted: #9db0a5; --bg: #071013; --terminal-bg:#020807; --terminal-text:#cfeedd; --input-bg:#00140a; --send-bg:#00140a; --nick-color:var(--accent); --sidebar-bg: rgba(0,0,0,0.16); }
+
+/* WHITE THEME */
+.theme-white { --accent: #0b0f10; --muted: #475057; --bg: #ffffff; --terminal-bg:#f6f6f7; --terminal-text:#0b0f10; --input-bg:#ffffff; --send-bg:#e6e6e6; --nick-color:#0b0f10; --sidebar-bg: rgba(0,0,0,0.03); }
+
+/* SOLAR THEME */
+.theme-solar { --accent: #ffb86b; --muted: #e6cdb1; --bg: #071013; --terminal-bg:#0c0a07; --terminal-text:#f5e9d0; --input-bg:#0b0a09; --send-bg:#2b1a12; --nick-color:#ffb86b; --sidebar-bg: rgba(0,0,0,0.12); }
+
+/* use variables */
+.tc-terminal{ background: var(--terminal-bg); color: var(--terminal-text); border: 1px solid rgba(255,255,255,0.03); }
+.tc-sidebar{ background: var(--sidebar-bg); color: var(--muted); border: 1px solid rgba(255,255,255,0.03); }
+.tc-input{ background: var(--input-bg); color: var(--terminal-text); border:1px solid rgba(255,255,255,0.03); }
+.tc-send{ background: var(--send-bg); color: var(--accent); border: 1px solid rgba(255,255,255,0.04); }
+.nick{ color: var(--nick-color); font-weight:700; }
+.meta{ color: var(--muted); font-size:13px; }
+`;
+    document.head.appendChild(style);
+  }, []);
+
+  // load PM sound (optional)
   useEffect(() => {
     try {
       pmSound.current = new Audio("/notification.mp3");
@@ -26,50 +75,20 @@ export default function TerminalUI({ socket, nick, setNick }) {
     }
   }, []);
 
-  // --- Theme handling ----------------------------------------------------
-  function applyTheme(theme) {
-    // theme: 'green' | 'white' | 'solar'
-    const root = document.documentElement;
-    if (theme === "white") {
-      root.style.setProperty("--accent", "#ffffff");
-      root.style.setProperty("--muted", "#d0d0d0");
-      root.style.setProperty("--bg", "#0b0f10");
-      root.style.setProperty("--terminal-bg", "#f7f7f8");
-      root.style.setProperty("--terminal-text", "#0b0f10");
-      root.style.setProperty("--input-bg", "#ffffff");
-      root.style.setProperty("--send-bg", "#e6e6e6");
-      root.style.setProperty("--nick-color", "#000000");
-      document.body.style.background = "#f2f4f5";
-    } else if (theme === "solar") {
-      root.style.setProperty("--accent", "#ffb86b");
-      root.style.setProperty("--muted", "#e6cdb1");
-      root.style.setProperty("--bg", "#071013");
-      root.style.setProperty("--terminal-bg", "#0c0a07");
-      root.style.setProperty("--terminal-text", "#f5e9d0");
-      root.style.setProperty("--input-bg", "#0b0a09");
-      root.style.setProperty("--send-bg", "#2b1a12");
-      root.style.setProperty("--nick-color", "#ffb86b");
-      document.body.style.background = "#071013";
-    } else {
-      // default green
-      root.style.setProperty("--accent", "#00ff6a");
-      root.style.setProperty("--muted", "#9db0a5");
-      root.style.setProperty("--bg", "#071013");
-      root.style.setProperty("--terminal-bg", "#020807");
-      root.style.setProperty("--terminal-text", "#cfeedd");
-      root.style.setProperty("--input-bg", "#00140a");
-      root.style.setProperty("--send-bg", "#00140a");
-      root.style.setProperty("--nick-color", "#00ff6a");
-      document.body.style.background = "#071013";
-    }
-    localStorage.setItem("theme", theme);
-  }
-
-  // apply stored theme on mount
+  // Apply theme class based on localStorage (green default)
   useEffect(() => {
     const t = localStorage.getItem("theme") || "green";
-    applyTheme(t);
+    applyThemeClass(t);
   }, []);
+
+  function applyThemeClass(theme) {
+    const root = document.documentElement;
+    root.classList.remove("theme-white", "theme-solar");
+    if (theme === "white") root.classList.add("theme-white");
+    else if (theme === "solar") root.classList.add("theme-solar");
+    // green = default (no extra class)
+    localStorage.setItem("theme", theme);
+  }
 
   // helper escape
   const escapeHtml = (s = "") =>
@@ -77,25 +96,30 @@ export default function TerminalUI({ socket, nick, setNick }) {
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
     );
 
-  // Append line
+  // append messages
   const appendLine = (html) =>
     setLines((prev) => {
       const out = [...prev, html];
-      return out.slice(-1000);
+      return out.slice(-1200);
     });
 
-  // scroll on new lines
+  // scroll terminal on updates
   useEffect(() => {
     const el = terminalRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [lines]);
 
-  // WebSocket message handling
+  // socket message handling (preserve behavior)
   useEffect(() => {
     if (!socket) return;
     const onMessage = (ev) => {
       let payload;
-      try { payload = JSON.parse(ev.data); } catch { appendLine(`<div class="meta">[raw] ${escapeHtml(ev.data)}</div>`); return; }
+      try {
+        payload = JSON.parse(ev.data);
+      } catch {
+        appendLine(`<div class="meta">[raw] ${escapeHtml(ev.data)}</div>`);
+        return;
+      }
 
       switch (payload.type) {
         case "message":
@@ -103,7 +127,8 @@ export default function TerminalUI({ socket, nick, setNick }) {
           break;
 
         case "private":
-          appendLine(`<span class="meta" style="color:var(--accent);">(private)</span> <span class="nick">${escapeHtml(payload.from)}</span> → <span class="nick">${escapeHtml(payload.to)}</span>: ${escapeHtml(payload.text)}`);
+          appendLine(`<span class="meta" style="color:var(--accent)">(private)</span> <span class="nick">${escapeHtml(payload.from)}</span> → <span class="nick">${escapeHtml(payload.to)}</span>: ${escapeHtml(payload.text)}`);
+          // unread counter only when recipient is me
           if (payload.to === nick && payload.from !== nick) {
             setUnreadPMs((prev) => ({ ...prev, [payload.from]: (prev[payload.from] || 0) + 1 }));
             document.title = `📩 New PM from ${payload.from}`;
@@ -112,7 +137,6 @@ export default function TerminalUI({ socket, nick, setNick }) {
           break;
 
         case "system":
-          // server now sends command-system messages privately to the invoker
           appendLine(`<span class="meta">[system]</span> ${escapeHtml(payload.text)}`);
           break;
 
@@ -146,7 +170,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     return () => socket.removeEventListener("message", onMessage);
   }, [socket, nick]);
 
-  // clear generic title on focus
+  // focus clears generic title (not per-user counters)
   useEffect(() => {
     const onFocus = () => { document.title = "TerminusChat"; };
     window.addEventListener("focus", onFocus);
@@ -163,7 +187,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     return () => socket.removeEventListener("open", onOpen);
   }, [socket, nick]);
 
-  // handle slash commands
+  // commands
   const handleCommand = (raw) => {
     const trimmed = raw.trim();
     if (!trimmed) return;
@@ -179,9 +203,9 @@ export default function TerminalUI({ socket, nick, setNick }) {
         if (!args) { appendLine(`<span class="meta">Usage: /nick &lt;name&gt;</span>`); return; }
         {
           const newNick = args.substring(0, 24);
-          setNick(newNick); // parent persists to cookie/localStorage
+          setNick(newNick);
           try { socket && socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: "nick", newNick })); } catch {}
-          appendLine(`<span class="meta">Nickname updated to <span style="color:var(--nick-color)">${escapeHtml(newNick)}</span></span>`);
+          appendLine(`<span class="meta">Nickname changed to <span class="nick">${escapeHtml(newNick)}</span></span>`);
         }
         break;
 
@@ -226,7 +250,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     try { socket && socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: "message", text: value })); } catch { appendLine(`<span class="meta">Failed to send message (socket closed).</span>`); }
   };
 
-  // clicking a user prefills /msg and clears their unread counter
+  // click user -> prefill /msg and clear that user's unread count
   const handleClickUser = (username) => {
     if (!inputRef.current) return;
     inputRef.current.value = `/msg ${username} `;
@@ -236,85 +260,74 @@ export default function TerminalUI({ socket, nick, setNick }) {
       delete copy[username];
       return copy;
     });
-    // reset title if no unread remain
-    const remaining = Object.values(unreadPMs).reduce((a, b) => a + b, 0);
-    if (!remaining) document.title = "TerminusChat";
   };
 
-  // theme select handler used by <select>
-  const onThemeChange = (e) => applyTheme(e.target.value);
-
-  // Styles that reference CSS variables (so themes affect these)
-  const terminalStyle = {
-    background: "var(--terminal-bg)",
-    color: "var(--terminal-text)",
-  };
-  const sidebarStyle = {
-    background: "var(--bg)",
-    color: "var(--muted)",
-  };
-  const inputStyle = {
-    background: "var(--input-bg)",
-    color: "var(--terminal-text)",
-    border: "1px solid rgba(255,255,255,0.03)",
-  };
-  const sendBtnStyle = {
-    background: "var(--send-bg)",
-    color: "var(--accent)",
+  // theme change handler
+  const onThemeSelect = (e) => {
+    applyThemeClass(e.target.value);
   };
 
   return (
-    <div className="flex gap-4">
-      {/* Terminal area */}
-      <div className="flex-1">
-        <div ref={terminalRef} className="rounded p-3 min-h-[400px] max-h-[60vh] overflow-auto font-mono text-sm" style={terminalStyle}>
+    <div className="tc-wrapper" style={{ padding: 8 }}>
+      <div className="tc-main">
+        <div ref={terminalRef} className="tc-terminal" role="log" aria-live="polite">
           {lines.map((l, i) => (
             <div key={i} className="whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: l }} />
           ))}
         </div>
 
-        <div className="flex gap-2 mt-3">
+        <div className="tc-input-row">
           <input
             ref={inputRef}
-            className="flex-1 p-2 rounded text-sm"
-            style={inputStyle}
+            className="tc-input"
             placeholder="Type a message or /command (eg. /help or /msg user hello)"
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                const val = e.target.value;
+                const v = e.target.value;
                 e.target.value = "";
-                handleSend(val);
+                handleSend(v);
               }
             }}
           />
-          <button className="px-4 py-2 rounded" style={sendBtnStyle} onClick={() => { const val = inputRef.current?.value || ""; if (val) { inputRef.current.value = ""; handleSend(val); } }}>
+          <button className="tc-send" onClick={() => { const v = inputRef.current?.value || ""; if (v) { inputRef.current.value = ""; handleSend(v); } }}>
             Send
           </button>
         </div>
       </div>
 
-      {/* Sidebar */}
-      <aside className="w-56 p-2 rounded overflow-y-auto h-[60vh] font-mono" style={sidebarStyle}>
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 700, marginBottom: 6, color: "var(--muted)" }}>Appearance</div>
-          <select defaultValue={localStorage.getItem("theme") || "green"} onChange={onThemeChange} className="w-full p-1 rounded" style={{ background: "transparent", color: "var(--muted)", border: "1px solid rgba(255,255,255,0.03)" }}>
-            <option value="green">Green (default)</option>
-            <option value="white">White</option>
-            <option value="solar">Solar</option>
-          </select>
+      {/* sidebar */}
+      <aside className={`tc-sidebar ${!sidebarOpen ? "closed" : ""}`}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ fontWeight: 700, color: "var(--muted)" }}>Appearance</div>
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{ background: "transparent", border: "none", color: "var(--muted)", cursor: "pointer" }}>
+            {sidebarOpen ? "Hide" : "Show"}
+          </button>
         </div>
 
-        <div style={{ fontWeight: 700, marginBottom: 8, color: "var(--muted)" }}>Users Online</div>
-        {users.length === 0 && <div style={{ fontSize: 13, color: "var(--muted)" }}>No users online</div>}
-        {users.map((u) => (
-          <div key={u.nick} onClick={() => handleClickUser(u.nick)} title={`Click to send a private message to ${u.nick}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 8px", borderRadius: 6, cursor: "pointer" }} >
-            <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--terminal-text)" }}>{u.nick}</div>
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              {u.isAdmin && <span style={{ color: "#ffb86b", fontSize: 12 }}>[ADMIN]</span>}
-              {unreadPMs[u.nick] ? <span style={{ background: "red", color: "white", padding: "2px 6px", borderRadius: 8, fontSize: 12 }}>{unreadPMs[u.nick]}</span> : null}
+        <select defaultValue={localStorage.getItem("theme") || "green"} onChange={onThemeSelect} style={{ width: "100%", padding: 8, borderRadius: 6, background: "transparent", color: "var(--muted)", border: "1px solid rgba(255,255,255,0.03)" }}>
+          <option value="green">Green (default)</option>
+          <option value="white">White</option>
+          <option value="solar">Solar</option>
+        </select>
+
+        <div style={{ fontWeight: 700, marginTop: 12, color: "var(--muted)" }}>Users Online</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+          {users.length === 0 && <div className="tc-meta">No users online</div>}
+          {users.map((u) => (
+            <div key={u.nick} className="tc-user-row" onClick={() => handleClickUser(u.nick)} title={`Click to PM ${u.nick}`}>
+              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--terminal-text)" }}>{u.nick}</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                {u.isAdmin && <div style={{ color: "#ffb86b", fontSize: 12 }}>[ADMIN]</div>}
+                {unreadPMs[u.nick] ? <div className="tc-unread-badge">{unreadPMs[u.nick]}</div> : null}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
+
+        <div style={{ marginTop: "auto", paddingTop: 8 }}>
+          <div className="tc-meta">You: <span style={{ color: "var(--nick-color)" }}>{nick}</span></div>
+          {isAdmin && <div style={{ color: "var(--accent)", marginTop: 6, fontWeight: 600 }}>ADMIN MODE</div>}
+        </div>
       </aside>
     </div>
   );
