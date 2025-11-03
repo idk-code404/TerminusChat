@@ -1,245 +1,277 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+
+// sound for PM notifications
+const pingSound = new Audio('/ping.mp3'); // optional: add this to /public
 
 export default function TerminalUI({ socket, nick, setNick }) {
   const [messages, setMessages] = useState([]);
-  const [onlineUsers, setOnlineUsers] = useState({});
+  const [users, setUsers] = useState({});
+  const [unreadPM, setUnreadPM] = useState({});
   const [input, setInput] = useState('');
-  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'dark');
-  const [privateChats, setPrivateChats] = useState({});
-  const [unread, setUnread] = useState({});
-  const chatRef = useRef(null);
+  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'green');
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  // --- Theme handler ---
+  const chatRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Apply theme
   useEffect(() => {
     const root = document.documentElement;
-    const themes = {
-      dark: {
-        '--bg': '#071013',
-        '--text': '#9db0a5',
-        '--accent': '#00ff6a',
-        '--input-bg': '#020807',
-      },
-      light: {
-        '--bg': '#f4f4f4',
-        '--text': '#222',
-        '--accent': '#007b5e',
-        '--input-bg': '#ffffff',
-      },
-      neon: {
-        '--bg': '#050505',
-        '--text': '#0affef',
-        '--accent': '#00ff9f',
-        '--input-bg': '#000814',
-      },
-    };
-    const t = themes[theme] || themes.dark;
-    Object.entries(t).forEach(([k, v]) => root.style.setProperty(k, v));
+    switch (theme) {
+      case 'light':
+        root.style.setProperty('--bg', '#f4f4f4');
+        root.style.setProperty('--text', '#222');
+        root.style.setProperty('--accent', '#007aff');
+        break;
+      case 'dark':
+        root.style.setProperty('--bg', '#0b0f10');
+        root.style.setProperty('--text', '#9db0a5');
+        root.style.setProperty('--accent', '#00ff6a');
+        break;
+      case 'green':
+      default:
+        root.style.setProperty('--bg', '#041208');
+        root.style.setProperty('--text', '#9df5c3');
+        root.style.setProperty('--accent', '#00ff6a');
+    }
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  // --- Scroll to bottom on new message ---
+  // Auto scroll
   useEffect(() => {
-    if (chatRef.current) {
+    if (chatRef.current)
       chatRef.current.scrollTop = chatRef.current.scrollHeight;
-    }
   }, [messages]);
 
-  // --- Handle incoming messages ---
+  // WebSocket events
   useEffect(() => {
     if (!socket) return;
-    const handleMsg = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.private && msg.to === nick && msg.nick !== nick) {
-        setUnread((prev) => ({
-          ...prev,
-          [msg.nick]: (prev[msg.nick] || 0) + 1,
-        }));
-        playNotification();
+
+    const handleMessage = (event) => {
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
       }
-      if (msg.type === 'system' && msg.to && msg.to !== nick) return; // system msgs only for intended user
-      setMessages((prev) => [...prev, msg]);
-      if (msg.type === 'userlist') {
-        const users = {};
-        msg.users.forEach((u) => {
-          users[u.name] = { admin: u.admin };
-        });
-        setOnlineUsers(users);
+
+      if (data.type === 'message' || data.type === 'system' || data.type === 'pm') {
+        setMessages((prev) => [...prev, data]);
+        if (data.type === 'pm' && data.to === nick) {
+          // add unread count
+          setUnreadPM((prev) => ({
+            ...prev,
+            [data.from]: (prev[data.from] || 0) + 1,
+          }));
+          try {
+            pingSound.play().catch(() => {});
+          } catch {}
+        }
       }
+
+      if (data.type === 'userlist') setUsers(data.users);
+      if (data.type === 'loginResult' && data.ok) setIsAdmin(true);
+      if (data.type === 'logoutResult') setIsAdmin(false);
     };
-    socket.addEventListener('message', handleMsg);
-    return () => socket.removeEventListener('message', handleMsg);
+
+    socket.addEventListener('message', handleMessage);
+    return () => socket.removeEventListener('message', handleMessage);
   }, [socket, nick]);
 
-  const playNotification = () => {
-    try {
-      const audio = new Audio(
-        'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQgAAAAA'
-      );
-      audio.play();
-    } catch (e) {}
-  };
+  const sendCommand = (cmdline) => {
+    const [cmd, ...args] = cmdline.slice(1).split(' ');
+    const argStr = args.join(' ');
 
-  // --- Handle commands ---
-  const handleCommand = (line) => {
-    const parts = line.trim().split(' ');
-    const cmd = parts[0].substring(1).toLowerCase();
-    const args = parts.slice(1);
     switch (cmd) {
-      case 'help':
-        addSystemMsg('Commands: /help, /nick <name>, /theme <dark|light|neon>, /msg <user> <message>, /clear');
-        break;
-      case 'nick':
-        if (!args[0]) addSystemMsg('Usage: /nick <newname>');
-        else {
-          const newNick = args[0];
-          socket.send(JSON.stringify({ type: 'nick', newNick }));
-          setNick(newNick);
-          addSystemMsg(`Your nickname is now ${newNick}`);
-        }
-        break;
       case 'theme':
-        if (['dark', 'light', 'neon'].includes(args[0])) setTheme(args[0]);
-        else addSystemMsg('Usage: /theme <dark|light|neon>');
+        if (['light', 'dark', 'green'].includes(argStr)) setTheme(argStr);
+        addLocalMessage(`[system] Theme changed to ${argStr}`);
         break;
-      case 'msg':
-        if (args.length < 2) {
-          addSystemMsg('Usage: /msg <user> <message>');
-          return;
-        }
-        const toUser = args[0];
-        const text = args.slice(1).join(' ');
-        socket.send(JSON.stringify({ type: 'private', to: toUser, text }));
-        addPrivateMsg(nick, toUser, text);
+
+      case 'login':
+        socket.send(JSON.stringify({ type: 'login', key: argStr }));
+        addLocalMessage(`[system] Attempting login...`);
         break;
+
+      case 'logout':
+        socket.send(JSON.stringify({ type: 'logout' }));
+        addLocalMessage(`[system] Logged out`);
+        break;
+
       case 'clear':
+        if (isAdmin) socket.send(JSON.stringify({ type: 'clear' }));
         setMessages([]);
+        addLocalMessage(`[system] Chat cleared (local)`);
         break;
+
+      case 'nick':
+        if (!argStr) return addLocalMessage(`[system] Usage: /nick <name>`);
+        setNick(argStr);
+        addLocalMessage(`[system] Your nickname is now ${argStr}`);
+        break;
+
+      case 'msg':
+        if (args.length < 2)
+          return addLocalMessage(`[system] Usage: /msg <user> <message>`);
+        const target = args[0];
+        const msgText = args.slice(1).join(' ');
+        socket.send(JSON.stringify({ type: 'pm', to: target, text: msgText }));
+        addLocalMessage(`[to ${target}] ${msgText}`, 'pm');
+        break;
+
       default:
-        addSystemMsg(`Unknown command: ${cmd}`);
+        addLocalMessage(`[system] Unknown command: /${cmd}`);
     }
   };
 
-  const addSystemMsg = (text) => {
-    setMessages((prev) => [...prev, { type: 'system', text, to: nick }]);
-  };
-
-  const addPrivateMsg = (from, to, text) => {
-    setPrivateChats((prev) => {
-      const conv = prev[to] || [];
-      return { ...prev, [to]: [...conv, { from, text }] };
-    });
-  };
-
-  const handleSend = () => {
+  const sendMessage = () => {
     if (!input.trim()) return;
-    if (input.startsWith('/')) handleCommand(input);
-    else socket.send(JSON.stringify({ type: 'message', text: input }));
+    if (input.startsWith('/')) sendCommand(input.trim());
+    else socket.send(JSON.stringify({ type: 'message', text: input.trim() }));
     setInput('');
   };
 
-  const handleUserClick = (user) => {
-    if (user === nick) return;
-    setInput(`/msg ${user} `);
-    setUnread((prev) => ({ ...prev, [user]: 0 }));
+  const addLocalMessage = (text, type = 'system') => {
+    setMessages((prev) => [...prev, { type, text, local: true, ts: Date.now() }]);
   };
+
+  const handleUserClick = (username) => {
+    setInput(`/msg ${username} `);
+    inputRef.current?.focus();
+  };
+
+  const formatTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   return (
     <div
-      className="flex flex-col h-[100dvh] w-full overflow-hidden"
+      className="flex flex-col flex-1 h-[100dvh] w-full overflow-hidden"
       style={{
         background: 'var(--bg)',
         color: 'var(--text)',
       }}
     >
-      {/* MAIN CHAT AREA */}
-      <div
-        ref={chatRef}
-        className="flex-1 overflow-y-auto p-3 sm:p-4 text-sm sm:text-base"
-        style={{
-          wordBreak: 'break-word',
-          scrollBehavior: 'smooth',
-          overscrollBehavior: 'contain',
-        }}
-      >
-        {messages.map((m, i) => {
-          if (m.type === 'system')
-            return (
-              <div key={i} className="text-xs opacity-70">
-                [system] {m.text}
-              </div>
-            );
-          if (m.type === 'message')
-            return (
-              <div key={i}>
-                <span
-                  className="font-bold cursor-pointer"
-                  style={{ color: 'var(--accent)' }}
-                  onClick={() => handleUserClick(m.nick)}
-                >
-                  {m.nick}
-                </span>
-                : {m.text}
-              </div>
-            );
-          if (m.type === 'private')
-            return (
-              <div key={i}>
-                <span
-                  className="font-bold cursor-pointer"
-                  style={{ color: 'var(--accent)' }}
-                  onClick={() => handleUserClick(m.nick)}
-                >
-                  [PM] {m.nick}
-                </span>
-                : {m.text}
-              </div>
-            );
-          return null;
-        })}
-      </div>
-
-      {/* INPUT BAR */}
-      <div
-        className="flex gap-2 p-2 sm:p-3 border-t border-[#0a1a17]"
-        style={{ background: 'var(--input-bg)' }}
-      >
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-          placeholder="Type a message or command..."
-          className="flex-1 bg-transparent outline-none text-[var(--text)] placeholder-[#888] text-sm sm:text-base"
-          inputMode="text"
-          enterKeyHint="send"
-        />
-        <button
-          onClick={handleSend}
-          className="px-4 py-2 rounded bg-[var(--accent)] text-black font-bold active:scale-95 transition"
-        >
-          Send
-        </button>
-      </div>
-
-      {/* USER LIST PANEL (BOTTOM ON MOBILE, SIDE ON DESKTOP) */}
-      <div className="absolute top-2 right-2 sm:right-4 sm:top-4 bg-[var(--input-bg)] p-2 rounded-md border border-[#0a1a17] max-h-[60vh] sm:max-h-[70vh] overflow-y-auto text-xs sm:text-sm">
-        <div className="font-bold mb-2 text-[var(--accent)]">Online Users</div>
-        {Object.entries(onlineUsers).map(([u, data]) => (
+      {/* Main layout */}
+      <div className="flex flex-1 overflow-hidden sm:flex-row flex-col gap-2 sm:gap-4">
+        
+        {/* Chat section */}
+        <div className="flex flex-col flex-1 overflow-hidden rounded-lg border border-gray-800 bg-[rgba(0,0,0,0.25)]">
           <div
-            key={u}
-            onClick={() => handleUserClick(u)}
-            className="cursor-pointer flex justify-between items-center py-1 hover:opacity-80"
+            ref={chatRef}
+            className="flex-1 overflow-y-auto px-3 py-2 sm:p-4 text-sm sm:text-base"
+            style={{
+              scrollBehavior: 'smooth',
+              wordBreak: 'break-word',
+              overscrollBehavior: 'contain',
+            }}
           >
-            <span>
-              {u === nick ? <strong>{u} (you)</strong> : u}{' '}
-              {data.admin && <span className="text-[var(--accent)]">(admin)</span>}
-            </span>
-            {unread[u] > 0 && (
-              <span className="ml-2 bg-[var(--accent)] text-black rounded-full px-2 text-xs">
-                {unread[u]}
-              </span>
-            )}
+            {messages.map((msg, i) => (
+              <div key={i} className="mb-1 leading-snug">
+                {msg.type === 'message' && (
+                  <span>
+                    <span
+                      className="font-bold cursor-pointer"
+                      style={{ color: 'var(--accent)' }}
+                      onClick={() => handleUserClick(msg.nick)}
+                    >
+                      {msg.nick}
+                    </span>
+                    <span className="text-xs opacity-60"> @{formatTime(msg.ts)}</span>
+                    : {msg.text}
+                  </span>
+                )}
+                {msg.type === 'pm' && (
+                  <span>
+                    <span className="text-[var(--accent)] font-semibold">
+                      [PM] {msg.from === nick ? `→ ${msg.to}` : `${msg.from} → you`}
+                    </span>
+                    : {msg.text}
+                  </span>
+                )}
+                {msg.type === 'system' && (
+                  <span className="opacity-70">{msg.text}</span>
+                )}
+              </div>
+            ))}
           </div>
-        ))}
+
+          {/* Input row */}
+          <div className="flex items-center gap-2 p-2 sm:p-3 border-t border-gray-700 bg-[rgba(0,0,0,0.35)]">
+            <input
+              ref={inputRef}
+              className="flex-1 bg-[rgba(0,0,0,0.4)] border border-gray-700 rounded-md px-3 py-2
+                         focus:outline-none focus:ring-1 focus:ring-[var(--accent)] text-[var(--text)]"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+              placeholder="Type a message or command..."
+              inputMode="text"
+              enterKeyHint="send"
+            />
+            <button
+              className="px-3 py-2 rounded-md text-sm sm:text-base"
+              style={{
+                background: 'var(--accent)',
+                color: '#000',
+                fontWeight: 600,
+              }}
+              onClick={sendMessage}
+            >
+              Send
+            </button>
+          </div>
+        </div>
+
+        {/* Sidebar: Users */}
+        <aside className="sm:w-64 w-full sm:max-w-none flex-shrink-0 overflow-y-auto rounded-lg border border-gray-800 bg-[rgba(0,0,0,0.25)] p-3">
+          <div className="mb-2 text-[var(--accent)] font-semibold">Online Users</div>
+          <div className="flex flex-wrap sm:flex-col gap-2 sm:gap-1">
+            {Object.keys(users).length === 0 && (
+              <div className="text-gray-500 text-sm">No users</div>
+            )}
+            {Object.entries(users).map(([username, data]) => (
+              <div
+                key={username}
+                onClick={() => handleUserClick(username)}
+                className="cursor-pointer flex items-center justify-between rounded-md px-2 py-1 hover:bg-[rgba(255,255,255,0.05)]"
+              >
+                <span style={{ color: data.admin ? 'gold' : 'var(--text)' }}>
+                  {username === nick ? `${username} (you)` : username}
+                </span>
+                {unreadPM[username] && (
+                  <span className="text-xs bg-[var(--accent)] text-black rounded-full px-2 py-0.5 font-bold">
+                    {unreadPM[username]}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <hr className="my-3 border-gray-700" />
+          <div>
+            <label className="text-sm text-gray-400 mr-2">Theme:</label>
+            <select
+              className="bg-[rgba(0,0,0,0.4)] border border-gray-700 rounded px-2 py-1 text-sm"
+              value={theme}
+              onChange={(e) => setTheme(e.target.value)}
+            >
+              <option value="green">Matrix</option>
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </div>
+
+          {isAdmin && (
+            <div className="mt-3">
+              <button
+                className="text-xs text-black font-semibold px-3 py-1 rounded"
+                style={{ background: 'var(--accent)' }}
+                onClick={() => socket.send(JSON.stringify({ type: 'clear' }))}
+              >
+                Clear Global Chat
+              </button>
+            </div>
+          )}
+        </aside>
       </div>
     </div>
   );
