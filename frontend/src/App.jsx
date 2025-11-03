@@ -13,7 +13,6 @@ function getCookie(name) {
 }
 
 export default function App() {
-  // Load nickname from cookie or localStorage
   const initialNick = (() => {
     if (typeof window === 'undefined') return '';
     const cookieName = getCookie('terminus_nick');
@@ -24,7 +23,7 @@ export default function App() {
   const [nick, setNick] = useState(initialNick);
   const [ws, setWs] = useState(null);
 
-  // Ask user for nickname if not set
+  // Ask for nickname if none
   useEffect(() => {
     if (!nick) {
       let name = '';
@@ -37,10 +36,9 @@ export default function App() {
     }
   }, [nick]);
 
-  // Connect to WebSocket server
+  // Connect to WebSocket
   useEffect(() => {
     if (!nick) return;
-
     const backendBase = import.meta.env.VITE_BACKEND_URL || `${location.protocol}//${location.hostname}:3000`;
     const backend = backendBase.replace(/\/$/, '');
     const wsUrl = backend.replace(/^http/, 'ws');
@@ -49,7 +47,6 @@ export default function App() {
 
     socket.addEventListener('open', () => {
       console.log('WebSocket connected to', wsUrl);
-      // Just send the nick to server — no local "[system]" echo
       socket.send(JSON.stringify({ type: 'nick', newNick: nick }));
     });
 
@@ -63,7 +60,6 @@ export default function App() {
     };
   }, [nick]);
 
-  // Persist nick and sync with server
   const persistNick = (newNick) => {
     setNick(newNick);
     localStorage.setItem('nick', newNick);
@@ -74,7 +70,14 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#071013] text-[#9db0a5] font-mono flex flex-col">
+    <div
+      className="flex flex-col min-h-screen w-full overflow-hidden font-mono bg-[#071013] text-[#9db0a5]
+                 sm:p-6 p-2"
+      style={{
+        touchAction: 'manipulation',
+        WebkitTapHighlightColor: 'transparent',
+      }}
+    >
       {nick && ws && (
         <TerminalUI
           socket={ws}
