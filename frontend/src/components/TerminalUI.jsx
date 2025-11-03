@@ -1,277 +1,273 @@
-import React, { useState, useEffect, useRef } from 'react';
-
-// sound for PM notifications
-const pingSound = new Audio('/ping.mp3'); // optional: add this to /public
+import React, { useState, useEffect, useRef } from "react";
 
 export default function TerminalUI({ socket, nick, setNick }) {
   const [messages, setMessages] = useState([]);
-  const [users, setUsers] = useState({});
-  const [unreadPM, setUnreadPM] = useState({});
-  const [input, setInput] = useState('');
-  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'green');
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [input, setInput] = useState("");
+  const [theme, setTheme] = useState(localStorage.getItem("theme") || "green");
+  const [users, setUsers] = useState([]);
+  const [unreadPMs, setUnreadPMs] = useState({});
+  const chatEndRef = useRef(null);
+  const fileInputRef = useRef(null);
 
-  const chatRef = useRef(null);
-  const inputRef = useRef(null);
+  const themes = {
+    green: { bg: "#000000", text: "#00FF66", accent: "#00CC55" },
+    blue: { bg: "#0A0F1F", text: "#00BFFF", accent: "#0077FF" },
+    gray: { bg: "#101010", text: "#CCCCCC", accent: "#AAAAAA" },
+    cyber: { bg: "#050018", text: "#39FF14", accent: "#0FF" },
+  };
 
-  // Apply theme
+  const currentTheme = themes[theme];
+
   useEffect(() => {
-    const root = document.documentElement;
-    switch (theme) {
-      case 'light':
-        root.style.setProperty('--bg', '#f4f4f4');
-        root.style.setProperty('--text', '#222');
-        root.style.setProperty('--accent', '#007aff');
-        break;
-      case 'dark':
-        root.style.setProperty('--bg', '#0b0f10');
-        root.style.setProperty('--text', '#9db0a5');
-        root.style.setProperty('--accent', '#00ff6a');
-        break;
-      case 'green':
-      default:
-        root.style.setProperty('--bg', '#041208');
-        root.style.setProperty('--text', '#9df5c3');
-        root.style.setProperty('--accent', '#00ff6a');
-    }
-    localStorage.setItem('theme', theme);
+    document.body.style.backgroundColor = currentTheme.bg;
+    document.body.style.color = currentTheme.text;
   }, [theme]);
 
-  // Auto scroll
+  // Scroll to bottom
   useEffect(() => {
-    if (chatRef.current)
-      chatRef.current.scrollTop = chatRef.current.scrollHeight;
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // WebSocket events
+  // Handle incoming WebSocket messages
   useEffect(() => {
     if (!socket) return;
 
-    const handleMessage = (event) => {
-      let data;
-      try {
-        data = JSON.parse(event.data);
-      } catch {
-        return;
-      }
+    socket.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "message" || msg.type === "private" || msg.type === "file") {
+        setMessages((prev) => [...prev, msg]);
 
-      if (data.type === 'message' || data.type === 'system' || data.type === 'pm') {
-        setMessages((prev) => [...prev, data]);
-        if (data.type === 'pm' && data.to === nick) {
-          // add unread count
-          setUnreadPM((prev) => ({
+        // Track unread PMs
+        if (msg.type === "private" && msg.from !== nick) {
+          setUnreadPMs((prev) => ({
             ...prev,
-            [data.from]: (prev[data.from] || 0) + 1,
+            [msg.from]: (prev[msg.from] || 0) + 1,
           }));
-          try {
-            pingSound.play().catch(() => {});
-          } catch {}
         }
+      } else if (msg.type === "system" && msg.selfOnly !== true) {
+        setMessages((prev) => [...prev, { from: "[system]", text: msg.text }]);
+      } else if (msg.type === "userlist") {
+        setUsers(msg.users);
       }
-
-      if (data.type === 'userlist') setUsers(data.users);
-      if (data.type === 'loginResult' && data.ok) setIsAdmin(true);
-      if (data.type === 'logoutResult') setIsAdmin(false);
     };
-
-    socket.addEventListener('message', handleMessage);
-    return () => socket.removeEventListener('message', handleMessage);
   }, [socket, nick]);
 
-  const sendCommand = (cmdline) => {
-    const [cmd, ...args] = cmdline.slice(1).split(' ');
-    const argStr = args.join(' ');
+  const sendMessage = (text) => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
-    switch (cmd) {
-      case 'theme':
-        if (['light', 'dark', 'green'].includes(argStr)) setTheme(argStr);
-        addLocalMessage(`[system] Theme changed to ${argStr}`);
+    if (text.startsWith("/")) {
+      handleCommand(text);
+    } else {
+      socket.send(JSON.stringify({ type: "message", text }));
+    }
+
+    setInput("");
+  };
+
+  const handleCommand = (cmd) => {
+    const args = cmd.split(" ");
+    const base = args[0].toLowerCase();
+
+    switch (base) {
+      case "/nick":
+        if (args[1]) {
+          const newNick = args.slice(1).join(" ");
+          socket.send(JSON.stringify({ type: "nick", newNick }));
+          setNick(newNick);
+          localStorage.setItem("nick", newNick);
+          addSystemMessage(`Your nickname is now ${newNick}`, true);
+        } else addSystemMessage("Usage: /nick <new_name>", true);
         break;
 
-      case 'login':
-        socket.send(JSON.stringify({ type: 'login', key: argStr }));
-        addLocalMessage(`[system] Attempting login...`);
+      case "/theme":
+        if (args[1] && themes[args[1]]) {
+          setTheme(args[1]);
+          localStorage.setItem("theme", args[1]);
+          addSystemMessage(`Theme changed to ${args[1]}`, true);
+        } else {
+          addSystemMessage(
+            "Available themes: " + Object.keys(themes).join(", "),
+            true
+          );
+        }
         break;
 
-      case 'logout':
-        socket.send(JSON.stringify({ type: 'logout' }));
-        addLocalMessage(`[system] Logged out`);
+      case "/help":
+        addSystemMessage(
+          `Available commands:
+  /nick <name> — change your nickname
+  /msg <user> <message> — send a private message
+  /clear — clear your chat
+  /theme <name> — change terminal theme
+  /users — list online users
+  /upload — share a file
+  /help — show this help message`,
+          true
+        );
         break;
 
-      case 'clear':
-        if (isAdmin) socket.send(JSON.stringify({ type: 'clear' }));
+      case "/clear":
         setMessages([]);
-        addLocalMessage(`[system] Chat cleared (local)`);
+        addSystemMessage("Chat cleared.", true);
         break;
 
-      case 'nick':
-        if (!argStr) return addLocalMessage(`[system] Usage: /nick <name>`);
-        setNick(argStr);
-        addLocalMessage(`[system] Your nickname is now ${argStr}`);
+      case "/msg":
+        if (args[1] && args[2]) {
+          const target = args[1];
+          const msgText = args.slice(2).join(" ");
+          socket.send(JSON.stringify({ type: "private", to: target, text: msgText }));
+          addSystemMessage(`(Private to ${target}): ${msgText}`, true);
+        } else addSystemMessage("Usage: /msg <user> <message>", true);
         break;
 
-      case 'msg':
-        if (args.length < 2)
-          return addLocalMessage(`[system] Usage: /msg <user> <message>`);
-        const target = args[0];
-        const msgText = args.slice(1).join(' ');
-        socket.send(JSON.stringify({ type: 'pm', to: target, text: msgText }));
-        addLocalMessage(`[to ${target}] ${msgText}`, 'pm');
+      case "/upload":
+        fileInputRef.current?.click();
+        break;
+
+      case "/users":
+        addSystemMessage(
+          "Online users: " +
+            users.map((u) => `${u.name}${u.isAdmin ? " [admin]" : ""}`).join(", "),
+          true
+        );
         break;
 
       default:
-        addLocalMessage(`[system] Unknown command: /${cmd}`);
+        addSystemMessage("Unknown command. Type /help for a list.", true);
     }
   };
 
-  const sendMessage = () => {
-    if (!input.trim()) return;
-    if (input.startsWith('/')) sendCommand(input.trim());
-    else socket.send(JSON.stringify({ type: 'message', text: input.trim() }));
-    setInput('');
+  const addSystemMessage = (text, selfOnly = false) => {
+    setMessages((prev) => [...prev, { from: "[system]", text }]);
   };
 
-  const addLocalMessage = (text, type = 'system') => {
-    setMessages((prev) => [...prev, { type, text, local: true, ts: Date.now() }]);
-  };
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
 
-  const handleUserClick = (username) => {
-    setInput(`/msg ${username} `);
-    inputRef.current?.focus();
+    const reader = new FileReader();
+    reader.onload = () => {
+      socket.send(
+        JSON.stringify({
+          type: "file",
+          filename: file.name,
+          data: reader.result,
+        })
+      );
+      addSystemMessage(`File "${file.name}" sent!`, true);
+    };
+    reader.readAsDataURL(file);
   };
-
-  const formatTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   return (
     <div
-      className="flex flex-col flex-1 h-[100dvh] w-full overflow-hidden"
+      className="flex flex-col md:flex-row w-full h-[100vh] md:h-[90vh]"
       style={{
-        background: 'var(--bg)',
-        color: 'var(--text)',
+        backgroundColor: currentTheme.bg,
+        color: currentTheme.text,
+        transition: "0.3s ease",
       }}
     >
-      {/* Main layout */}
-      <div className="flex flex-1 overflow-hidden sm:flex-row flex-col gap-2 sm:gap-4">
-        
-        {/* Chat section */}
-        <div className="flex flex-col flex-1 overflow-hidden rounded-lg border border-gray-800 bg-[rgba(0,0,0,0.25)]">
-          <div
-            ref={chatRef}
-            className="flex-1 overflow-y-auto px-3 py-2 sm:p-4 text-sm sm:text-base"
-            style={{
-              scrollBehavior: 'smooth',
-              wordBreak: 'break-word',
-              overscrollBehavior: 'contain',
-            }}
-          >
-            {messages.map((msg, i) => (
-              <div key={i} className="mb-1 leading-snug">
-                {msg.type === 'message' && (
-                  <span>
-                    <span
-                      className="font-bold cursor-pointer"
-                      style={{ color: 'var(--accent)' }}
-                      onClick={() => handleUserClick(msg.nick)}
-                    >
-                      {msg.nick}
-                    </span>
-                    <span className="text-xs opacity-60"> @{formatTime(msg.ts)}</span>
-                    : {msg.text}
-                  </span>
-                )}
-                {msg.type === 'pm' && (
-                  <span>
-                    <span className="text-[var(--accent)] font-semibold">
-                      [PM] {msg.from === nick ? `→ ${msg.to}` : `${msg.from} → you`}
-                    </span>
-                    : {msg.text}
-                  </span>
-                )}
-                {msg.type === 'system' && (
-                  <span className="opacity-70">{msg.text}</span>
-                )}
-              </div>
-            ))}
-          </div>
-
-          {/* Input row */}
-          <div className="flex items-center gap-2 p-2 sm:p-3 border-t border-gray-700 bg-[rgba(0,0,0,0.35)]">
-            <input
-              ref={inputRef}
-              className="flex-1 bg-[rgba(0,0,0,0.4)] border border-gray-700 rounded-md px-3 py-2
-                         focus:outline-none focus:ring-1 focus:ring-[var(--accent)] text-[var(--text)]"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-              placeholder="Type a message or command..."
-              inputMode="text"
-              enterKeyHint="send"
-            />
-            <button
-              className="px-3 py-2 rounded-md text-sm sm:text-base"
-              style={{
-                background: 'var(--accent)',
-                color: '#000',
-                fontWeight: 600,
-              }}
-              onClick={sendMessage}
+      {/* User list */}
+      <div
+        className="w-full md:w-1/4 p-3 overflow-y-auto border-b md:border-r border-[#222]"
+        style={{ borderColor: currentTheme.accent }}
+      >
+        <h2 className="text-sm mb-2">Online Users</h2>
+        <ul className="space-y-1 text-sm">
+          {users.map((u) => (
+            <li
+              key={u.name}
+              className="cursor-pointer hover:underline"
+              onClick={() => setInput(`/msg ${u.name} `)}
             >
-              Send
-            </button>
-          </div>
+              {u.name}
+              {u.isAdmin && " 👑"}
+              {unreadPMs[u.name] ? (
+                <span
+                  style={{
+                    color: currentTheme.accent,
+                    marginLeft: 4,
+                  }}
+                >
+                  ({unreadPMs[u.name]})
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+
+        <div className="mt-4">
+          <label className="text-xs block mb-1">Theme:</label>
+          <select
+            value={theme}
+            onChange={(e) => {
+              setTheme(e.target.value);
+              localStorage.setItem("theme", e.target.value);
+            }}
+            className="bg-transparent border border-[#333] text-xs p-1 rounded w-full"
+          >
+            {Object.keys(themes).map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* Chat display */}
+      <div className="flex flex-col flex-1 p-3 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto mb-3">
+          {messages.map((m, i) => (
+            <div key={i} className="mb-1 break-words text-sm">
+              {m.type === "file" ? (
+                <div>
+                  <strong>{m.from}:</strong>{" "}
+                  <a
+                    href={m.data}
+                    download={m.filename}
+                    style={{ color: currentTheme.accent }}
+                  >
+                    {m.filename}
+                  </a>
+                </div>
+              ) : (
+                <span>
+                  <strong>{m.from}:</strong> {m.text}
+                </span>
+              )}
+            </div>
+          ))}
+          <div ref={chatEndRef} />
         </div>
 
-        {/* Sidebar: Users */}
-        <aside className="sm:w-64 w-full sm:max-w-none flex-shrink-0 overflow-y-auto rounded-lg border border-gray-800 bg-[rgba(0,0,0,0.25)] p-3">
-          <div className="mb-2 text-[var(--accent)] font-semibold">Online Users</div>
-          <div className="flex flex-wrap sm:flex-col gap-2 sm:gap-1">
-            {Object.keys(users).length === 0 && (
-              <div className="text-gray-500 text-sm">No users</div>
-            )}
-            {Object.entries(users).map(([username, data]) => (
-              <div
-                key={username}
-                onClick={() => handleUserClick(username)}
-                className="cursor-pointer flex items-center justify-between rounded-md px-2 py-1 hover:bg-[rgba(255,255,255,0.05)]"
-              >
-                <span style={{ color: data.admin ? 'gold' : 'var(--text)' }}>
-                  {username === nick ? `${username} (you)` : username}
-                </span>
-                {unreadPM[username] && (
-                  <span className="text-xs bg-[var(--accent)] text-black rounded-full px-2 py-0.5 font-bold">
-                    {unreadPM[username]}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-
-          <hr className="my-3 border-gray-700" />
-          <div>
-            <label className="text-sm text-gray-400 mr-2">Theme:</label>
-            <select
-              className="bg-[rgba(0,0,0,0.4)] border border-gray-700 rounded px-2 py-1 text-sm"
-              value={theme}
-              onChange={(e) => setTheme(e.target.value)}
-            >
-              <option value="green">Matrix</option>
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-            </select>
-          </div>
-
-          {isAdmin && (
-            <div className="mt-3">
-              <button
-                className="text-xs text-black font-semibold px-3 py-1 rounded"
-                style={{ background: 'var(--accent)' }}
-                onClick={() => socket.send(JSON.stringify({ type: 'clear' }))}
-              >
-                Clear Global Chat
-              </button>
-            </div>
-          )}
-        </aside>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            className="flex-1 p-2 rounded bg-transparent border border-[#333] focus:outline-none text-sm"
+            placeholder="Type a message or command..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && sendMessage(input)}
+          />
+          <button
+            className="px-3 py-2 rounded text-sm"
+            style={{
+              backgroundColor: currentTheme.accent,
+              color: currentTheme.bg,
+            }}
+            onClick={() => sendMessage(input)}
+          >
+            Send
+          </button>
+          <input
+            type="file"
+            ref={fileInputRef}
+            style={{ display: "none" }}
+            onChange={handleFileUpload}
+          />
+        </div>
       </div>
     </div>
   );
