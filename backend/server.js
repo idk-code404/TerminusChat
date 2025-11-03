@@ -1,163 +1,151 @@
-// server.js
-// TerminusChat backend — sends command-system notices only to the invoking user.
-// Also handles private messages, admin login/clear, and broadcasts user-list.
+import express from "express";
+import http from "http";
+import { WebSocketServer } from "ws";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
-const fs = require('fs');
-const path = require('path');
-const WebSocket = require('ws');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+app.use(express.static(path.join(__dirname, "dist")));
+app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || 'supersecret123';
 
-const usernamesFile = path.join(__dirname, 'usernames.json');
+// Persistent usernames
+const usernamesFile = path.join(__dirname, "usernames.json");
 let usernames = {};
 if (fs.existsSync(usernamesFile)) {
-  try { usernames = JSON.parse(fs.readFileSync(usernamesFile, 'utf8')); } catch (e) { usernames = {}; }
+  try {
+    usernames = JSON.parse(fs.readFileSync(usernamesFile, "utf8"));
+  } catch {
+    usernames = {};
+  }
 }
 function saveUsernames() {
-  try { fs.writeFileSync(usernamesFile, JSON.stringify(usernames, null, 2)); } catch (e) { console.error('saveUsernames error', e); }
+  fs.writeFileSync(usernamesFile, JSON.stringify(usernames, null, 2));
 }
 
-const wss = new WebSocket.Server({ port: PORT });
+// Bug reports
+const bugReportFile = path.join(__dirname, "bugreports.json");
+let bugReports = [];
+if (fs.existsSync(bugReportFile)) {
+  try {
+    bugReports = JSON.parse(fs.readFileSync(bugReportFile, "utf8"));
+  } catch {
+    bugReports = [];
+  }
+}
+function saveBugs() {
+  fs.writeFileSync(bugReportFile, JSON.stringify(bugReports, null, 2));
+}
 
-function broadcast(obj, except = null) {
-  const data = JSON.stringify(obj);
-  for (const c of wss.clients) {
-    if (c.readyState === WebSocket.OPEN && c !== except) c.send(data);
+const clients = new Map();
+const ADMIN_KEY = process.env.ADMIN_KEY || "supersecretkey";
+
+function broadcast(data, exclude = null) {
+  for (const [_, ws] of clients.entries()) {
+    if (ws !== exclude && ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify(data));
+    }
   }
 }
 
-function broadcastUserList() {
-  const list = [];
-  for (const c of wss.clients) {
-    if (c.readyState === WebSocket.OPEN) list.push({ nick: c.nick || 'guest', isAdmin: !!c.isAdmin });
-  }
-  broadcast({ type: 'user-list', users: list });
-}
-
-function findClientByNick(nick) {
-  for (const c of wss.clients) {
-    if (c.readyState === WebSocket.OPEN && c.nick === nick) return c;
-  }
-  return null;
-}
-
-wss.on('connection', (ws, req) => {
+wss.on("connection", (ws, req) => {
+  const ip = req.socket.remoteAddress;
+  ws.nick = usernames[ip]?.nick || "guest";
   ws.isAdmin = false;
-  ws.nick = 'guest_' + Math.floor(Math.random() * 10000);
+  clients.set(ws, ws);
 
-  // try restore from remote address (simple persistence)
-  const addr = (req && req.socket && req.socket.remoteAddress) ? req.socket.remoteAddress : 'unknown';
-  if (usernames[addr] && usernames[addr].nick) {
-    ws.nick = usernames[addr].nick;
-  } else {
-    usernames[addr] = { nick: ws.nick, lastSeen: Date.now() };
-    saveUsernames();
-  }
+  // Send existing users list
+  ws.send(JSON.stringify({ type: "userlist", users: getUserList() }));
 
-  // send welcome ONLY to this client
-  ws.send(JSON.stringify({ type: 'system', text: `Welcome, ${ws.nick}! Type /help for commands.` }));
+  // Broadcast join
+  broadcast({ type: "join", nick: ws.nick });
 
-  // send history? (if implemented) - placeholder empty for now
-  ws.send(JSON.stringify({ type: 'history', history: [] }));
+  ws.on("message", (msg) => {
+    try {
+      const data = JSON.parse(msg.toString());
 
-  // broadcast user-list to everyone (so UI updates)
-  broadcastUserList();
-
-  ws.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
-
-    // NICK CHANGE -> send system notice only to invoking user, update persistence, update user list
-    if (msg.type === 'nick') {
-      const old = ws.nick;
-      const newNick = (msg.newNick || '').toString().substring(0, 24) || old;
-      ws.nick = newNick;
-      usernames[addr] = { nick: ws.nick, lastSeen: Date.now() };
-      saveUsernames();
-
-      // system notice ONLY to this client
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'system', text: `Your nickname is now ${ws.nick}` }));
+      // Change nickname
+      if (data.type === "nick" && data.newNick) {
+        ws.nick = data.newNick.trim() || "guest";
+        usernames[ip] = { nick: ws.nick, lastSeen: Date.now() };
+        saveUsernames();
+        ws.send(JSON.stringify({ type: "system", msg: `[system] Your nickname is now ${ws.nick}` }));
+        broadcast({ type: "userlist", users: getUserList() });
       }
 
-      // update everyone with updated user list (no system broadcast about name change)
-      broadcastUserList();
-      return;
-    }
+      // Normal message
+      else if (data.type === "chat") {
+        broadcast({ type: "chat", nick: ws.nick, msg: data.msg });
+      }
 
-    // LOGIN -> verify key, notify only invoking user, and update user list
-    if (msg.type === 'login') {
-      if (msg.key === ADMIN_KEY) {
-        ws.isAdmin = true;
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'admin-status', value: true }));
-          ws.send(JSON.stringify({ type: 'system', text: 'Admin privileges granted.' })); // only to invoker
+      // Private message
+      else if (data.type === "pm") {
+        const target = [...clients.values()].find(u => u.nick === data.to);
+        if (target) {
+          target.send(JSON.stringify({ type: "pm", from: ws.nick, msg: data.msg }));
+          ws.send(JSON.stringify({ type: "system", msg: `[system] PM sent to ${data.to}` }));
+        } else {
+          ws.send(JSON.stringify({ type: "system", msg: `[system] User ${data.to} not found.` }));
         }
-        broadcastUserList();
-      } else {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'system', text: 'Invalid admin key.' }));
       }
-      return;
-    }
 
-    // LOGOUT -> remove admin, notify only invoker, update user list
-    if (msg.type === 'logout') {
-      ws.isAdmin = false;
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'admin-status', value: false }));
-        ws.send(JSON.stringify({ type: 'system', text: 'Logged out of admin mode.' }));
+      // Admin login/logout
+      else if (data.type === "login") {
+        if (data.key === ADMIN_KEY) {
+          ws.isAdmin = true;
+          ws.send(JSON.stringify({ type: "system", msg: "[system] Admin mode activated." }));
+        } else {
+          ws.send(JSON.stringify({ type: "system", msg: "[system] Invalid key." }));
+        }
+      } else if (data.type === "logout") {
+        ws.isAdmin = false;
+        ws.send(JSON.stringify({ type: "system", msg: "[system] Logged out of admin mode." }));
       }
-      broadcastUserList();
-      return;
-    }
 
-    // CLEAR -> admin only: broadcast clear and a system notice to everyone (global admin action)
-    if (msg.type === 'clear') {
-      if (ws.isAdmin) {
-        broadcast({ type: 'clear' });
-        broadcast({ type: 'system', text: `[ADMIN] Global chat cleared by ${ws.nick}.` });
-      } else {
-        // not admin -> notify only the invoker that they can't clear globally
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'system', text: 'You are not authorized to clear chat globally.' }));
+      // Clear chat
+      else if (data.type === "clear") {
+        if (ws.isAdmin) {
+          broadcast({ type: "clear" });
+          ws.send(JSON.stringify({ type: "system", msg: "[system] Chat cleared globally." }));
+        } else {
+          ws.send(JSON.stringify({ type: "system", msg: "[system] You must be admin to use /clear." }));
+        }
       }
-      return;
-    }
 
-    // PRIVATE message /msg -> deliver only to recipient + sender (echo)
-    if (msg.type === 'private' || msg.type === 'msg') {
-      const to = msg.to;
-      const text = (msg.text || '').toString().substring(0, 2000);
-      const recip = findClientByNick(to);
-      const payload = { type: 'private', from: ws.nick, to, text, ts: Date.now() };
-      if (recip && recip.readyState === WebSocket.OPEN) recip.send(JSON.stringify(payload));
-      // always echo back to sender as confirmation
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
-      return;
-    }
+      // Bug report
+      else if (data.type === "bug" && data.report) {
+        const report = {
+          nick: ws.nick || "unknown",
+          time: new Date().toISOString(),
+          report: data.report.trim()
+        };
+        bugReports.push(report);
+        saveBugs();
+        ws.send(JSON.stringify({ type: "system", msg: "[system] Bug report sent successfully!" }));
+      }
 
-    // GLOBAL message -> broadcast
-    if (msg.type === 'message') {
-      const text = (msg.text || '').toString().substring(0, 2000);
-      const out = { type: 'message', nick: ws.nick, text, ts: Date.now() };
-      broadcast(out);
-      return;
+    } catch (err) {
+      console.error("Message error:", err);
     }
-
-    // unknown -> ignore or optionally reply privately
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'system', text: 'Unknown command or message type.' }));
   });
 
-  ws.on('close', () => {
-    // update stored username lastSeen
-    usernames[addr] = usernames[addr] || {};
-    usernames[addr].nick = ws.nick;
-    usernames[addr].lastSeen = Date.now();
-    saveUsernames();
-
-    // update presence list for everyone
-    broadcastUserList();
+  ws.on("close", () => {
+    clients.delete(ws);
+    broadcast({ type: "userlist", users: getUserList() });
   });
 });
 
-console.log(`TerminusChat WS server running on port ${PORT}`);
+function getUserList() {
+  return [...clients.values()].map(ws => ({
+    nick: ws.nick,
+    admin: ws.isAdmin,
+  }));
+}
+
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
