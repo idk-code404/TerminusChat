@@ -1,8 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 /**
- * TerminalUI — Fix: toggle button always visible, improved slide animation,
- * responsive / auto-fit, private messages, unread counters, click-to-PM.
+ * TerminalUI — Sidebar auto-only (no show/hide button), responsive + themes + PMs + unread counters + click-to-PM.
  *
  * Props:
  *  - socket: WebSocket instance
@@ -25,9 +24,9 @@ export default function TerminalUI({ socket, nick, setNick }) {
   const [mobileInputFixed, setMobileInputFixed] = useState(() => (isClient ? window.innerWidth <= 640 : false));
   const pmSoundRef = useRef(null);
 
-  // inject CSS once
+  // inject styles once
   useEffect(() => {
-    const ID = "terminusui-toggle-fix-styles";
+    const ID = "terminusui-no-toggle-styles";
     if (document.getElementById(ID)) return;
     const style = document.createElement("style");
     style.id = ID;
@@ -43,23 +42,6 @@ export default function TerminalUI({ socket, nick, setNick }) {
 /* Sidebar and animation */
 .tc-sidebar { width:260px; min-width:200px; border-radius:8px; padding:12px; box-sizing:border-box; display:flex; flex-direction:column; gap:12px; transition: transform 220ms ease, opacity 220ms ease; transform: translateX(0); opacity:1; will-change:transform,opacity; position:relative; }
 .tc-sidebar.closed { transform: translateX(14px) scale(0.98); opacity:0; pointer-events:none; }
-
-/* Sidebar toggle (always visible) */
-.sidebar-toggle {
-  position: absolute;
-  right: 20px;
-  top: 12px;
-  z-index: 120;
-  background: rgba(0,0,0,0.24);
-  border: 1px solid rgba(255,255,255,0.05);
-  color: var(--muted);
-  padding: 6px 10px;
-  border-radius: 8px;
-  cursor: pointer;
-  backdrop-filter: blur(4px);
-  transition: background 150ms, transform 120ms;
-}
-.sidebar-toggle:active{ transform: scale(0.98); }
 
 /* user row */
 .tc-user-row { display:flex; justify-content:space-between; align-items:center; padding:6px 8px; border-radius:6px; cursor:pointer; transition: background 120ms; }
@@ -101,6 +83,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
       if (wrapperRef.current) wrapperRef.current.style.height = `${newH}px`;
 
       setMobileInputFixed(window.innerWidth <= 640);
+      // auto-open/close sidebar depending on width (no manual toggle)
       if (window.innerWidth > 960) setSidebarOpen(true);
       else setSidebarOpen(false);
     }
@@ -123,7 +106,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     }
   }, []);
 
-  // ws message handling
+  // websocket message handling
   useEffect(() => {
     if (!socket) return;
     const onMsg = (ev) => {
@@ -171,7 +154,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     return () => socket.removeEventListener("message", onMsg);
   }, [socket, nick]);
 
-  // send nick on open
+  // send nick when socket opens
   useEffect(() => {
     if (!socket) return;
     const onOpen = () => {
@@ -181,7 +164,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     return () => socket.removeEventListener("open", onOpen);
   }, [socket, nick]);
 
-  // helper escape + append
+  // helpers
   const escapeHtml = (s = "") => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const appendLine = (html) => setLines((p) => [...p, html].slice(-1200));
 
@@ -241,7 +224,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     try { socket && socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: "message", text: value })); } catch { appendLine(`<span class="meta">Failed to send message (socket closed).</span>`); }
   };
 
-  // clicking a user prefill PM + clear unread
+  // click user -> prefill /msg and clear unread
   const handleClickUser = (username) => {
     if (!inputRef.current) return;
     inputRef.current.value = `/msg ${username} `;
@@ -253,7 +236,7 @@ export default function TerminalUI({ socket, nick, setNick }) {
     });
   };
 
-  // theme apply helper (class-based)
+  // theme apply helper
   const applyThemeClass = (theme) => {
     const root = document.documentElement;
     root.classList.remove("theme-white", "theme-solar");
@@ -262,24 +245,12 @@ export default function TerminalUI({ socket, nick, setNick }) {
     localStorage.setItem("theme", theme);
   };
 
-  // computed class for sidebar (for animation)
+  // classes and mobile input
   const sidebarClass = sidebarOpen ? "tc-sidebar" : "tc-sidebar closed";
-
-  // input row class (mobile fixed)
   const inputRowClass = mobileInputFixed ? "tc-input-row mobile-fixed" : "tc-input-row";
 
   return (
-    <div ref={wrapperRef} className="tc-wrapper" style={{ position: "relative" }}>
-      {/* Toggle button — always visible (fixed in wrapper), moved out of sidebar */}
-      <button
-        className="sidebar-toggle"
-        aria-expanded={sidebarOpen}
-        aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-        onClick={() => setSidebarOpen((s) => !s)}
-      >
-        {sidebarOpen ? "Hide" : "Show"}
-      </button>
-
+    <div ref={wrapperRef} className="tc-wrapper">
       {/* Main chat */}
       <div className="tc-main" style={{ minHeight: 0 }}>
         <div ref={terminalRef} className="tc-terminal" role="log" aria-live="polite">
@@ -307,11 +278,11 @@ export default function TerminalUI({ socket, nick, setNick }) {
         </div>
       </div>
 
-      {/* Sidebar (slides in/out) */}
+      {/* Sidebar (auto open/closed based on viewport) */}
       <aside className={sidebarClass} style={{ position: "relative" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ fontWeight: 700, color: "var(--muted)" }}>Appearance</div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div>
             <select defaultValue={localStorage.getItem("theme") || "green"} onChange={(e) => applyThemeClass(e.target.value)} style={{ padding: 6, borderRadius: 6, background: "transparent", color: "var(--muted)" }}>
               <option value="green">Green</option>
               <option value="white">White</option>
