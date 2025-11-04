@@ -8,7 +8,7 @@ const WebSocket = require('ws');
 const { randomBytes } = require('crypto');
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || 'supersecret123';
+const ADMIN_KEY = process.env.ADMIN_KEY || '4076af225ada1d4c65e03f8563be2c46';
 const MAX_HISTORY = Number(process.env.MAX_HISTORY) || 500;
 
 const dataDir = __dirname;
