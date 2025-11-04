@@ -1,114 +1,103 @@
-const fs = require('fs');
-const path = require('path');
-const WebSocket = require('ws');
-const wss = new WebSocket.Server({ port: 3000 });
+import React, { useState, useEffect } from 'react';
+import TerminalUI from './components/TerminalUI';
 
-const CHAT_FILE = path.join(__dirname, 'chat.json');
-const USERS_FILE = path.join(__dirname, 'usernames.json');
-const ADMIN_KEY = 'supersecret'; // change this
-
-// Load persistent chat and usernames
-let chat = [];
-let usernames = {};
-
-try { chat = JSON.parse(fs.readFileSync(CHAT_FILE)); } catch {}
-try { usernames = JSON.parse(fs.readFileSync(USERS_FILE)); } catch {}
-
-const clients = new Map(); // ws -> {nick, admin}
-
-function saveChat() { fs.writeFileSync(CHAT_FILE, JSON.stringify(chat, null, 2)); }
-function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(usernames, null, 2)); }
-
-// Broadcast to all connected clients
-function broadcast(data) {
-  const msg = JSON.stringify(data);
-  for (let ws of clients.keys()) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-  }
+function setCookie(name, value, days = 365) {
+  const expires = new Date(Date.now() + days * 864e5).toUTCString();
+  document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+}
+function getCookie(name) {
+  return document.cookie.split('; ').reduce((r, v) => {
+    const parts = v.split('=');
+    return parts[0] === encodeURIComponent(name) ? decodeURIComponent(parts.slice(1).join('=')) : r;
+  }, '');
 }
 
-function sendUserList() {
-  const list = {};
-  for (let [ws, info] of clients.entries()) {
-    list[info.nick] = { admin: info.admin };
+function getOrCreateClientId() {
+  if (typeof window === 'undefined') return null;
+  const key = 'terminus_clientId';
+  let id = localStorage.getItem(key);
+  if (!id) {
+    // crypto.randomUUID is best; fallback to random hex
+    try {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : null;
+    } catch {}
+    if (!id) id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem(key, id);
   }
-  broadcast({ type: 'userlist', users: list });
+  return id;
 }
 
-wss.on('connection', (ws) => {
-  const defaultNick = `guest${Math.floor(Math.random()*1000)}`;
-  clients.set(ws, { nick: defaultNick, admin: false });
+export default function App() {
+  const initialNick = (() => {
+    if (typeof window === 'undefined') return '';
+    const cookieName = getCookie('terminus_nick');
+    if (cookieName) return cookieName;
+    return localStorage.getItem('nick') || '';
+  })();
 
-  // Send persistent chat and current nick
-  ws.send(JSON.stringify({ type: 'history', chat }));
-  ws.send(JSON.stringify({ type: 'system', text: `Your nickname is now ${defaultNick}` }));
-  sendUserList();
+  const [nick, setNick] = useState(initialNick);
+  const [ws, setWs] = useState(null);
+  const clientId = getOrCreateClientId();
 
-  ws.on('message', (data) => {
-    let msg;
-    try { msg = JSON.parse(data); } catch { return; }
-
-    const userInfo = clients.get(ws);
-
-    switch(msg.type){
-      case 'message':
-        const chatMsg = { type: 'message', nick: userInfo.nick, text: msg.text, ts: Date.now() };
-        chat.push(chatMsg);
-        saveChat();
-        broadcast(chatMsg);
-        break;
-
-      case 'pm':
-        const pm = { type: 'pm', from: userInfo.nick, to: msg.to, text: msg.text, ts: Date.now() };
-        chat.push(pm); // optionally save PMs in chat.json too
-        saveChat();
-        // send only to recipient and sender
-        for (let [c, info] of clients.entries()) {
-          if (c.readyState !== WebSocket.OPEN) continue;
-          if (info.nick === pm.to || info.nick === pm.from) c.send(JSON.stringify(pm));
-        }
-        break;
-
-      case 'nick':
-        if (!msg.nick) break;
-        const oldNick = userInfo.nick;
-        userInfo.nick = msg.nick;
-        clients.set(ws, userInfo);
-        usernames[userInfo.nick] = userInfo.nick;
-        saveUsers();
-        ws.send(JSON.stringify({ type: 'system', text: `Your nickname is now ${msg.nick}` }));
-        sendUserList();
-        break;
-
-      case 'login':
-        if (msg.key === ADMIN_KEY) {
-          userInfo.admin = true;
-          clients.set(ws, userInfo);
-          ws.send(JSON.stringify({ type: 'loginResult', ok: true }));
-          sendUserList();
-        } else ws.send(JSON.stringify({ type: 'loginResult', ok: false }));
-        break;
-
-      case 'logout':
-        userInfo.admin = false;
-        clients.set(ws, userInfo);
-        ws.send(JSON.stringify({ type: 'logoutResult' }));
-        sendUserList();
-        break;
-
-      case 'clear':
-        if (!userInfo.admin) break;
-        chat = [];
-        saveChat();
-        broadcast({ type: 'clear' });
-        break;
+  // ensure user picks a name if none
+  useEffect(() => {
+    if (!nick) {
+      let name = '';
+      while (!name) {
+        name = (prompt('Welcome! What would you like to be called?') || '').trim();
+      }
+      setNick(name);
+      localStorage.setItem('nick', name);
+      setCookie('terminus_nick', name, 365);
     }
-  });
+  }, [nick]);
 
-  ws.on('close', () => {
-    clients.delete(ws);
-    sendUserList();
-  });
-});
+  useEffect(() => {
+    if (!nick) return;
+    const backendBase = import.meta.env.VITE_BACKEND_URL || `${location.protocol}//${location.hostname}:3000`;
+    const backend = backendBase.replace(/\/$/, '');
+    const wsUrl = backend.replace(/^http/, 'ws');
 
-console.log('Server running on ws://localhost:3000');
+    const socket = new WebSocket(wsUrl);
+
+    const onOpen = () => {
+      console.log('WebSocket connected to', wsUrl);
+      // send identify message so server can persist the nick under clientId
+      try {
+        socket.send(JSON.stringify({ type: 'identify', clientId, nick }));
+      } catch (e) {
+        console.warn('failed to send identify', e);
+      }
+    };
+
+    socket.addEventListener('open', onOpen);
+    socket.addEventListener('error', (e) => console.warn('WebSocket error', e));
+    socket.addEventListener('close', () => console.log('WebSocket closed'));
+
+    setWs(socket);
+    return () => {
+      socket.removeEventListener('open', onOpen);
+      try { socket.close(); } catch {}
+      setWs(null);
+    };
+  }, [nick, clientId]);
+
+  // when user changes nick via UI, persist locally and inform server
+  const persistNick = (newNick) => {
+    const safe = (newNick || '').toString().trim().substring(0, 48);
+    setNick(safe);
+    try { localStorage.setItem('nick', safe); } catch {}
+    try { setCookie('terminus_nick', safe, 365); } catch {}
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'nick', newNick: safe })); } catch {}
+      // also re-identify with same clientId so server stores mapping
+      try { ws.send(JSON.stringify({ type: 'identify', clientId, nick: safe })); } catch {}
+    }
+  };
+
+  return (
+    <div className="flex flex-col min-h-screen w-full overflow-hidden font-mono bg-[#071013] text-[#9db0a5] p-2">
+      {nick && ws && <TerminalUI socket={ws} nick={nick} setNick={persistNick} />}
+    </div>
+  );
+}
