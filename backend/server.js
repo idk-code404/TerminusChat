@@ -1,228 +1,183 @@
-import express from 'express';
-import { WebSocketServer } from 'ws';
-import fs from 'fs';
-import http from 'http';
-import path from 'path';
-import multer from 'multer';
-import { fileURLToPath } from 'url';
+import express from "express";
+import { WebSocketServer } from "ws";
+import fs from "fs";
+import path from "path";
+import http from "http";
+import multer from "multer";
+import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || '4076af225ada1d4c65e03f8563be2c46';
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// === Directories ===
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
-const usernamesPath = path.join(__dirname, 'usernames.json');
-const historyPath = path.join(__dirname, 'chatHistory.json');
-const filesMetaPath = path.join(__dirname, 'files.json');
+const DATA_DIR = path.join(__dirname, "data");
+const USERS_FILE = path.join(DATA_DIR, "usernames.json");
+const HISTORY_FILE = path.join(DATA_DIR, "chat_history.json");
+const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
+const ADMIN_KEY = "supersecretadminkey";
 
-// === Persistent Files ===
-if (!fs.existsSync(usernamesPath)) fs.writeFileSync(usernamesPath, '{}');
-if (!fs.existsSync(historyPath)) fs.writeFileSync(historyPath, '[]');
-if (!fs.existsSync(filesMetaPath)) fs.writeFileSync(filesMetaPath, '[]');
+// Ensure directories exist
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
+if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, "{}");
+if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, "[]");
 
-// === Load Data ===
-let usernames = JSON.parse(fs.readFileSync(usernamesPath));
-let chatHistory = JSON.parse(fs.readFileSync(historyPath));
-let fileList = JSON.parse(fs.readFileSync(filesMetaPath));
+// Load user data
+let usernames = JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+let chatHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8"));
 
-// === Helpers ===
-const saveUsernames = () => fs.writeFileSync(usernamesPath, JSON.stringify(usernames, null, 2));
-const saveHistory = () => fs.writeFileSync(historyPath, JSON.stringify(chatHistory, null, 2));
-const saveFiles = () => fs.writeFileSync(filesMetaPath, JSON.stringify(fileList, null, 2));
-
-// === Upload Middleware ===
+// Multer for file uploads (limit 1 GB)
 const upload = multer({
-  dest: uploadsDir,
-  limits: { fileSize: 1024 * 1024 * 1024 } // 1GB max per file
+  dest: UPLOAD_DIR,
+  limits: { fileSize: 1024 * 1024 * 1024 }, // 1 GB
 });
-app.use('/uploads', express.static(uploadsDir));
 
-// === Slur Filter ===
-const bannedWords = ['nigger', 'faggot', 'retard', 'kike', 'coon'];
-const containsSlur = (text) => bannedWords.some(w => text.toLowerCase().includes(w));
+app.use(express.static("public"));
+app.use("/uploads", express.static(UPLOAD_DIR));
 
-// === Connected Clients ===
-const clients = new Map(); // ws -> { nick, admin }
+// File upload endpoint
+app.post("/upload", upload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+  const fileUrl = `/uploads/${req.file.filename}`;
+  const fileInfo = {
+    type: "file",
+    user: req.query.user || "guest",
+    filename: req.file.originalname,
+    url: fileUrl,
+    size: req.file.size,
+    timestamp: Date.now(),
+  };
+  chatHistory.push(fileInfo);
+  fs.writeFileSync(HISTORY_FILE, JSON.stringify(chatHistory, null, 2));
+  broadcast(fileInfo);
+  res.json({ success: true, file: fileInfo });
+});
 
-// === Broadcast ===
-function broadcast(data, except = null) {
-  const msg = JSON.stringify(data);
-  for (const [ws] of clients) {
-    if (ws !== except && ws.readyState === ws.OPEN) ws.send(msg);
+// Helper functions
+const broadcast = (msg) => {
+  const data = JSON.stringify(msg);
+  for (const client of wss.clients) {
+    if (client.readyState === 1) client.send(data);
   }
-}
+};
 
-function sendTo(ws, data) {
-  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(data));
-}
+const profanityList = ["nigger", "faggot", "kike", "chink", "spic"];
+const sanitizeMessage = (text) => {
+  let sanitized = text;
+  for (const bad of profanityList) {
+    const regex = new RegExp(`\\b${bad}\\b`, "gi");
+    sanitized = sanitized.replace(regex, "***");
+  }
+  return sanitized;
+};
 
-// === File Utilities ===
-function calculateTotalUploadSize() {
-  return fs.readdirSync(uploadsDir)
-    .map(f => fs.statSync(path.join(uploadsDir, f)).size)
-    .reduce((a, b) => a + b, 0);
-}
+const getUserList = () => {
+  return [...wss.clients]
+    .filter((c) => c.readyState === 1)
+    .map((c) => ({
+      nick: c.nick || "guest",
+      isAdmin: c.isAdmin || false,
+    }));
+};
 
-// === WebSocket Handling ===
-wss.on('connection', (ws) => {
-  clients.set(ws, { nick: 'guest', admin: false });
+// WebSocket handling
+wss.on("connection", (ws) => {
+  ws.nick = "guest";
+  ws.isAdmin = false;
 
-  // Send chat history and user list
-  sendTo(ws, { type: 'history', data: chatHistory });
-  sendTo(ws, { type: 'files', data: fileList });
-  broadcastUserList();
+  ws.send(JSON.stringify({ type: "welcome", text: "Welcome to TerminusChat." }));
+  ws.send(JSON.stringify({ type: "history", data: chatHistory }));
+  ws.send(JSON.stringify({ type: "userlist", data: getUserList() }));
 
-  ws.on('message', (msg) => {
+  ws.on("message", (message) => {
+    let msg;
     try {
-      const { type, data } = JSON.parse(msg);
+      msg = JSON.parse(message);
+    } catch {
+      return;
+    }
 
-      if (type === 'setNick') {
-        const prev = clients.get(ws).nick;
-        clients.get(ws).nick = data.trim();
-        usernames[ws._socket.remoteAddress] = data.trim();
-        saveUsernames();
-        sendTo(ws, { type: 'system', text: `Your nickname is now ${data}` });
-        broadcastUserList();
-        return;
-      }
+    if (msg.type === "setnick") {
+      ws.nick = msg.nick;
+      usernames[msg.clientId] = msg.nick;
+      fs.writeFileSync(USERS_FILE, JSON.stringify(usernames, null, 2));
+      ws.send(
+        JSON.stringify({ type: "system", text: `Your nickname is now ${ws.nick}.` })
+      );
+      broadcast({ type: "userlist", data: getUserList() });
+      return;
+    }
 
-      if (type === 'login') {
-        if (data === ADMIN_KEY) {
-          clients.get(ws).admin = true;
-          sendTo(ws, { type: 'system', text: `You are now logged in as admin.` });
-        } else {
-          sendTo(ws, { type: 'system', text: `Invalid admin key.` });
-        }
-        return;
-      }
-
-      if (type === 'logout') {
-        clients.get(ws).admin = false;
-        sendTo(ws, { type: 'system', text: `You have logged out as admin.` });
-        return;
-      }
-
-      if (type === 'clear') {
-        if (!clients.get(ws).admin) {
-          sendTo(ws, { type: 'system', text: 'You do not have permission to clear chat.' });
-          return;
-        }
-        chatHistory = [];
-        saveHistory();
-        broadcast({ type: 'clear' });
-        return;
-      }
-
-      if (type === 'removefile') {
-        if (!clients.get(ws).admin) {
-          sendTo(ws, { type: 'system', text: 'Permission denied.' });
-          return;
-        }
-        const fileToDelete = data.trim();
-        const fullPath = path.join(uploadsDir, fileToDelete);
-        if (fs.existsSync(fullPath)) {
-          fs.unlinkSync(fullPath);
-          fileList = fileList.filter(f => f.name !== fileToDelete);
-          saveFiles();
-          broadcast({ type: 'files', data: fileList });
-          broadcast({ type: 'system', text: `${fileToDelete} was removed by admin.` });
-        } else {
-          sendTo(ws, { type: 'system', text: 'File not found.' });
-        }
-        return;
-      }
-
-      if (type === 'message') {
-        const sender = clients.get(ws);
-        const text = data.text.trim();
-
-        if (containsSlur(text)) {
-          sendTo(ws, { type: 'system', text: 'Message blocked: inappropriate language.' });
-          return;
-        }
-
-        if (text.startsWith('/msg ')) {
-          const [_, targetNick, ...msgParts] = text.split(' ');
-          const privateMsg = msgParts.join(' ');
-          for (const [client, info] of clients) {
-            if (info.nick === targetNick) {
-              sendTo(client, { type: 'private', from: sender.nick, text: privateMsg });
-              sendTo(ws, { type: 'private', to: targetNick, text: privateMsg });
-              return;
-            }
+    if (msg.type === "command") {
+      const [cmd, ...args] = msg.text.trim().split(" ");
+      switch (cmd) {
+        case "/login":
+          if (args[0] === ADMIN_KEY) {
+            ws.isAdmin = true;
+            ws.send({ type: "system", text: "You are now logged in as admin." });
+          } else {
+            ws.send({ type: "system", text: "Invalid admin key." });
           }
-          sendTo(ws, { type: 'system', text: `${targetNick} not found.` });
-          return;
-        }
-
-        // Normal message
-        const entry = {
-          nick: sender.nick,
-          text,
-          time: new Date().toISOString()
-        };
-        chatHistory.push(entry);
-        if (chatHistory.length > 500) chatHistory.shift(); // Limit history size
-        saveHistory();
-
-        broadcast({ type: 'message', data: entry });
+          break;
+        case "/logout":
+          ws.isAdmin = false;
+          ws.send({ type: "system", text: "You are now logged out." });
+          break;
+        case "/clear":
+          if (!ws.isAdmin) {
+            ws.send({ type: "system", text: "You are not authorized to clear chat." });
+            return;
+          }
+          chatHistory = [];
+          fs.writeFileSync(HISTORY_FILE, "[]");
+          broadcast({ type: "clearchat" });
+          break;
+        case "/removefile":
+          if (!ws.isAdmin) {
+            ws.send({ type: "system", text: "You are not authorized to remove files." });
+            return;
+          }
+          const fileToDelete = args.join(" ");
+          const found = chatHistory.find(
+            (entry) => entry.type === "file" && entry.filename === fileToDelete
+          );
+          if (found) {
+            try {
+              fs.unlinkSync(path.join(__dirname, found.url));
+            } catch {}
+            chatHistory = chatHistory.filter((entry) => entry !== found);
+            fs.writeFileSync(HISTORY_FILE, JSON.stringify(chatHistory, null, 2));
+            broadcast({ type: "system", text: `File ${fileToDelete} removed by admin.` });
+          } else {
+            ws.send({ type: "system", text: "File not found." });
+          }
+          break;
+        default:
+          ws.send({ type: "system", text: "Unknown command." });
       }
-    } catch (e) {
-      console.error('Message error:', e);
+      return;
+    }
+
+    if (msg.type === "chat") {
+      const text = sanitizeMessage(msg.text.trim());
+      const entry = {
+        type: "chat",
+        user: ws.nick,
+        text,
+        timestamp: Date.now(),
+      };
+      chatHistory.push(entry);
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify(chatHistory, null, 2));
+      broadcast(entry);
     }
   });
 
-  ws.on('close', () => {
-    clients.delete(ws);
-    broadcastUserList();
+  ws.on("close", () => {
+    broadcast({ type: "userlist", data: getUserList() });
   });
 });
 
-// === Update User List ===
-function broadcastUserList() {
-  const list = Array.from(clients.values()).map(u => ({
-    nick: u.nick,
-    admin: u.admin
-  }));
-  broadcast({ type: 'users', data: list });
-}
-
-// === Upload Endpoint ===
-app.post('/api/upload', upload.single('file'), (req, res) => {
-  try {
-    const totalSize = calculateTotalUploadSize();
-    if (totalSize > 1024 * 1024 * 1024) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'Upload limit exceeded (1GB total).' });
-    }
-
-    const fileMeta = {
-      name: req.file.filename,
-      original: req.file.originalname,
-      size: req.file.size,
-      time: new Date().toISOString(),
-      url: `/uploads/${req.file.filename}`
-    };
-    fileList.push(fileMeta);
-    saveFiles();
-    broadcast({ type: 'files', data: fileList });
-    res.json(fileMeta);
-  } catch (err) {
-    console.error('Upload error:', err);
-    res.status(500).json({ error: 'Upload failed.' });
-  }
-});
-
-// === Serve Frontend ===
-app.use(express.static(path.join(__dirname, 'dist')));
-app.get('*', (_, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
-
-// === Start Server ===
-server.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server running on ${PORT}`));
