@@ -1,43 +1,56 @@
-// server.js — robust WS server with HTTP health route + persistent usernames.json
-// Place usernames.json in same folder or server will create it.
-// WARNING: usernames.json is a simple dev store. Use a DB for production.
+// server.js
+// TerminusChat — WS server with persistent usernames and chat history.
+// place usernames.json and messages.json next to this file (they can start as {} and [] respectively)
 
-const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
 const { randomBytes } = require('crypto');
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
+const PORT = process.env.PORT || 3000;
 const ADMIN_KEY = process.env.ADMIN_KEY || 'supersecret123';
+const MAX_HISTORY = Number(process.env.MAX_HISTORY) || 500;
 
-const DATA_DIR = path.resolve(__dirname);
-const USERNAMES_FILE = path.join(DATA_DIR, 'usernames.json');
+const dataDir = __dirname;
+const usernamesFile = path.join(dataDir, 'usernames.json');
+const messagesFile = path.join(dataDir, 'messages.json');
 
 let usernames = {};
+let history = [];
 
-// Ensure usernames.json exists (create if missing)
-function ensureUsernamesFile() {
-  try {
-    if (!fs.existsSync(USERNAMES_FILE)) {
-      fs.writeFileSync(USERNAMES_FILE, JSON.stringify({}, null, 2), { encoding: 'utf8' });
-      console.info('Created usernames.json');
-    }
-    const raw = fs.readFileSync(USERNAMES_FILE, 'utf8') || '{}';
-    usernames = JSON.parse(raw);
-    console.info('Loaded usernames.json, entries:', Object.keys(usernames).length);
-  } catch (err) {
-    console.error('Fatal: could not read or create usernames.json:', err);
-    // throw so process exits and logs show reason
-    throw err;
+// load usernames if present
+try {
+  if (fs.existsSync(usernamesFile)) {
+    usernames = JSON.parse(fs.readFileSync(usernamesFile, 'utf8') || '{}');
   }
+} catch (e) {
+  console.error('Failed to read usernames.json:', e);
+  usernames = {};
+}
+
+// load message history if present
+try {
+  if (fs.existsSync(messagesFile)) {
+    history = JSON.parse(fs.readFileSync(messagesFile, 'utf8') || '[]');
+    if (!Array.isArray(history)) history = [];
+  }
+} catch (e) {
+  console.error('Failed to read messages.json:', e);
+  history = [];
 }
 
 function saveUsernames() {
   try {
-    fs.writeFileSync(USERNAMES_FILE, JSON.stringify(usernames, null, 2), 'utf8');
+    fs.writeFileSync(usernamesFile, JSON.stringify(usernames, null, 2), 'utf8');
   } catch (e) {
     console.error('Failed to save usernames.json:', e);
+  }
+}
+function saveHistory() {
+  try {
+    fs.writeFileSync(messagesFile, JSON.stringify(history, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to save messages.json:', e);
   }
 }
 
@@ -45,30 +58,19 @@ function makeClientId() {
   return randomBytes(12).toString('hex');
 }
 
-// Small HTTP server so hosts expecting HTTP don't immediately fail
-const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, service: 'TerminusChat', timestamp: Date.now() }));
-    return;
-  }
-  res.writeHead(404);
-  res.end();
-});
+const wss = new WebSocket.Server({ port: PORT });
 
-let wss;
-
+// Broadcast helper
 function broadcast(obj, except = null) {
   const data = JSON.stringify(obj);
   for (const c of wss.clients) {
-    try {
-      if (c.readyState === WebSocket.OPEN && c !== except) c.send(data);
-    } catch (e) {
-      console.warn('Failed to send to client:', e && e.message);
+    if (c.readyState === WebSocket.OPEN && c !== except) {
+      try { c.send(data); } catch (e) { /* ignore */ }
     }
   }
 }
 
+// send user-list to all
 function broadcastUserList() {
   const list = [];
   for (const c of wss.clients) {
@@ -79,6 +81,7 @@ function broadcastUserList() {
   broadcast({ type: 'user-list', users: list });
 }
 
+// find client by nickname (case-sensitive)
 function findClientByNick(nick) {
   for (const c of wss.clients) {
     if (c.readyState === WebSocket.OPEN && c.nick === nick) return c;
@@ -86,141 +89,165 @@ function findClientByNick(nick) {
   return null;
 }
 
-function start() {
-  ensureUsernamesFile();
+// push to history (public messages & system events). Keeps length <= MAX_HISTORY
+function pushHistory(item) {
+  // item should be a plain object (e.g. { type:'message', nick, text, ts })
+  history.push(item);
+  if (history.length > MAX_HISTORY) {
+    history = history.slice(history.length - MAX_HISTORY);
+  }
+  saveHistory();
+}
 
-  wss = new WebSocket.Server({ server });
+wss.on('connection', (ws) => {
+  ws.isAdmin = false;
+  ws.clientId = null;
+  ws.nick = 'guest_' + Math.floor(Math.random() * 10000);
 
-  wss.on('connection', (ws) => {
-    ws.isAdmin = false;
-    ws.clientId = null;
-    ws.nick = 'guest_' + Math.floor(Math.random() * 10000);
+  // send a private welcome and current history (most clients expect to receive history)
+  try {
+    ws.send(JSON.stringify({ type: 'system', text: 'Welcome to TerminusChat. Identify to restore your saved nickname.' }));
+    ws.send(JSON.stringify({ type: 'history', history: history.slice(-MAX_HISTORY) }));
+  } catch (e) { /* ignore */ }
 
-    // private welcome (not a global system echo)
-    try { ws.send(JSON.stringify({ type: 'system', text: 'Welcome to TerminusChat (send identify to restore name).' })); } catch (e) {}
+  // inform others of new connection
+  broadcastUserList();
 
-    broadcastUserList();
+  ws.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw); } catch (e) { 
+      // invalid JSON - ignore or optionally reply
+      try { ws.send(JSON.stringify({ type: 'system', text: 'Invalid message format.' })); } catch {}
+      return;
+    }
 
-    ws.on('message', (raw) => {
-      let msg;
-      try { msg = JSON.parse(raw); } catch (e) { 
-        try { ws.send(JSON.stringify({ type: 'system', text: 'Invalid JSON' })); } catch {}
-        return; 
+    // IDENTIFY: client provides clientId + nick to restore mapping
+    if (msg.type === 'identify') {
+      let clientId = typeof msg.clientId === 'string' && msg.clientId.trim() ? msg.clientId.trim() : makeClientId();
+      let nick = typeof msg.nick === 'string' && msg.nick.trim() ? msg.nick.trim().substring(0,48) : ws.nick;
+
+      ws.clientId = clientId;
+      ws.nick = nick || ws.nick;
+
+      // persist mapping
+      usernames[clientId] = { nick: ws.nick, lastSeen: Date.now() };
+      saveUsernames();
+
+      // reply only to this client with confirmation and assigned clientId
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'identified', clientId, nick: ws.nick })); } catch {}
       }
 
-      // Identify message to restore/save clientId -> nick mapping
-      if (msg.type === 'identify') {
-        let clientId = typeof msg.clientId === 'string' && msg.clientId.trim() ? msg.clientId.trim() : makeClientId();
-        let nick = typeof msg.nick === 'string' ? msg.nick.trim().substring(0, 48) : ws.nick;
-        ws.clientId = clientId;
-        ws.nick = nick || ws.nick;
-        usernames[clientId] = { nick: ws.nick, lastSeen: Date.now() };
-        saveUsernames();
-        try { ws.send(JSON.stringify({ type: 'identified', clientId, nick: ws.nick })); } catch (e) {}
-        broadcastUserList();
-        return;
-      }
+      // broadcast updated presence & (optionally) broadcast system that user restored name
+      broadcastUserList();
+      return;
+    }
 
-      if (msg.type === 'nick') {
-        const old = ws.nick;
-        const newNick = (msg.newNick || '').toString().trim().substring(0, 48) || old;
-        ws.nick = newNick;
-        if (ws.clientId) {
-          usernames[ws.clientId] = usernames[ws.clientId] || {};
-          usernames[ws.clientId].nick = ws.nick;
-          usernames[ws.clientId].lastSeen = Date.now();
-          saveUsernames();
-        }
-        try { ws.send(JSON.stringify({ type: 'system', text: `Your nickname is now ${ws.nick}` })); } catch (e) {}
-        broadcastUserList();
-        return;
-      }
+    // NICK change
+    if (msg.type === 'nick') {
+      const old = ws.nick;
+      const newNick = (msg.newNick || '').toString().trim().substring(0, 48) || old;
+      ws.nick = newNick;
 
-      if (msg.type === 'login') {
-        if (msg.key === ADMIN_KEY) {
-          ws.isAdmin = true;
-          try { ws.send(JSON.stringify({ type: 'admin-status', value: true })); ws.send(JSON.stringify({ type: 'system', text: 'Admin privileges granted.' })); } catch {}
-          broadcastUserList();
-        } else {
-          try { ws.send(JSON.stringify({ type: 'system', text: 'Invalid admin key.' })); } catch {}
-        }
-        return;
-      }
-
-      if (msg.type === 'logout') {
-        ws.isAdmin = false;
-        try { ws.send(JSON.stringify({ type: 'admin-status', value: false })); ws.send(JSON.stringify({ type: 'system', text: 'Logged out of admin mode.' })); } catch {}
-        broadcastUserList();
-        return;
-      }
-
-      if (msg.type === 'clear') {
-        if (ws.isAdmin) {
-          broadcast({ type: 'clear' });
-          broadcast({ type: 'system', text: `[ADMIN] Global chat cleared by ${ws.nick}.` });
-        } else {
-          try { ws.send(JSON.stringify({ type: 'system', text: 'You are not authorized to clear chat globally.' })); } catch {}
-        }
-        return;
-      }
-
-      if (msg.type === 'private' || msg.type === 'pm') {
-        const to = (msg.to || '').toString();
-        const text = (msg.text || '').toString().substring(0, 2000);
-        const recip = findClientByNick(to);
-        const payload = { type: 'pm', from: ws.nick, to, text, ts: Date.now() };
-        if (recip && recip.readyState === WebSocket.OPEN) recip.send(JSON.stringify(payload));
-        // echo to sender as confirmation
-        try { ws.send(JSON.stringify(payload)); } catch {}
-        return;
-      }
-
-      if (msg.type === 'message') {
-        const text = (msg.text || '').toString().substring(0, 2000);
-        const out = { type: 'message', nick: ws.nick, text, ts: Date.now() };
-        broadcast(out);
-        return;
-      }
-
-      // unknown type
-      try { ws.send(JSON.stringify({ type: 'system', text: 'Unknown command or message type.' })); } catch {}
-    });
-
-    ws.on('close', () => {
       if (ws.clientId) {
         usernames[ws.clientId] = usernames[ws.clientId] || {};
         usernames[ws.clientId].nick = ws.nick;
         usernames[ws.clientId].lastSeen = Date.now();
         saveUsernames();
       }
+
+      // private confirmation to invoker
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'system', text: `Your nickname is now ${ws.nick}` })); } catch {}
+      }
+      // broadcast updated user-list
       broadcastUserList();
-    });
+      return;
+    }
 
-    ws.on('error', (err) => {
-      console.warn('Client socket error:', err && err.message);
-    });
+    // LOGIN / LOGOUT admin
+    if (msg.type === 'login') {
+      if (msg.key === ADMIN_KEY) {
+        ws.isAdmin = true;
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'admin-status', value: true })); ws.send(JSON.stringify({ type: 'system', text: 'Admin privileges granted.' })); } catch {}
+        }
+        broadcastUserList();
+      } else {
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'system', text: 'Invalid admin key.' })); } catch {}
+        }
+      }
+      return;
+    }
+    if (msg.type === 'logout') {
+      ws.isAdmin = false;
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'admin-status', value: false })); ws.send(JSON.stringify({ type: 'system', text: 'Logged out of admin mode.' })); } catch {}
+      }
+      broadcastUserList();
+      return;
+    }
+
+    // CLEAR chat
+    if (msg.type === 'clear') {
+      if (ws.isAdmin) {
+        history = []; saveHistory();
+        broadcast({ type: 'clear' });
+        // system notice after clear (it will appear in new history)
+        const sys = { type: 'system', text: `[ADMIN] Global chat cleared by ${ws.nick}.`, ts: Date.now() };
+        pushHistory(sys);
+        broadcast(sys);
+      } else {
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'system', text: 'You are not authorized to clear chat globally.' })); } catch {}
+        }
+      }
+      return;
+    }
+
+    // PRIVATE / PM
+    if (msg.type === 'private' || msg.type === 'pm') {
+      const to = (msg.to || '').toString();
+      const text = (msg.text || '').toString().substring(0, 2000);
+      const recip = findClientByNick(to);
+      const payload = { type: 'pm', from: ws.nick, to, text, ts: Date.now() };
+      // deliver to recipient if online
+      if (recip && recip.readyState === WebSocket.OPEN) {
+        try { recip.send(JSON.stringify(payload)); } catch {}
+      }
+      // echo back to sender as confirmation
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify(payload)); } catch {}
+      }
+      // NOTE: private messages are NOT stored in public history
+      return;
+    }
+
+    // GLOBAL public message
+    if (msg.type === 'message') {
+      const text = (msg.text || '').toString().substring(0, 2000);
+      const out = { type: 'message', nick: ws.nick, text, ts: Date.now() };
+      pushHistory(out);         // persist public message
+      broadcast(out);          // broadcast to all
+      return;
+    }
+
+    // unknown -> respond privately
+    if (ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'system', text: 'Unknown command or message type.' })); } catch {}
+    }
   });
 
-  server.listen(PORT, () => {
-    console.log(`TerminusChat server listening on port ${PORT}`);
+  ws.on('close', () => {
+    if (ws.clientId) {
+      usernames[ws.clientId] = usernames[ws.clientId] || {};
+      usernames[ws.clientId].nick = ws.nick;
+      usernames[ws.clientId].lastSeen = Date.now();
+      saveUsernames();
+    }
+    broadcastUserList();
   });
-}
-
-// Global error handlers to surface debugging info in logs
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err && err.stack ? err.stack : err);
-  // keep process alive if desired, or exit to allow restart
-  process.exit(1);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled rejection:', reason);
-  process.exit(1);
 });
 
-// Start the server and catch startup errors
-try {
-  start();
-} catch (e) {
-  console.error('Startup failed:', e && e.stack ? e.stack : e);
-  process.exit(1);
-}
+console.log(`TerminusChat WS server running on port ${PORT}`);
