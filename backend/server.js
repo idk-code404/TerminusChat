@@ -1,193 +1,228 @@
-import express from "express";
-import http from "http";
-import { WebSocketServer } from "ws";
-import fs from "fs";
-import path from "path";
-import cors from "cors";
-import multer from "multer";
-import { fileURLToPath } from "url";
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import fs from 'fs';
+import http from 'http';
+import path from 'path';
+import multer from 'multer';
+import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const PORT = process.env.PORT || 3000;
+const ADMIN_KEY = process.env.ADMIN_KEY || 'supersecretadminkey';
+
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-app.use(cors());
-app.use(express.json());
+// === Directories ===
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+const usernamesPath = path.join(__dirname, 'usernames.json');
+const historyPath = path.join(__dirname, 'chatHistory.json');
+const filesMetaPath = path.join(__dirname, 'files.json');
 
-// Create uploads directory
-const uploadDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+// === Persistent Files ===
+if (!fs.existsSync(usernamesPath)) fs.writeFileSync(usernamesPath, '{}');
+if (!fs.existsSync(historyPath)) fs.writeFileSync(historyPath, '[]');
+if (!fs.existsSync(filesMetaPath)) fs.writeFileSync(filesMetaPath, '[]');
 
-// Serve uploaded files statically
-app.use("/uploads", express.static(uploadDir));
-
-// --- Multer setup for file uploads ---
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const safeName = Date.now() + "_" + file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
-    cb(null, safeName);
-  }
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB max
-});
-
-// Paths for persistent data
-const usernamesPath = path.join(__dirname, "usernames.json");
-const historyPath = path.join(__dirname, "chatHistory.json");
-
-if (!fs.existsSync(usernamesPath)) fs.writeFileSync(usernamesPath, "{}");
-if (!fs.existsSync(historyPath)) fs.writeFileSync(historyPath, "[]");
-
+// === Load Data ===
 let usernames = JSON.parse(fs.readFileSync(usernamesPath));
 let chatHistory = JSON.parse(fs.readFileSync(historyPath));
+let fileList = JSON.parse(fs.readFileSync(filesMetaPath));
 
-// --- MODERATION CONFIG ---
-const bannedWords = [
-  "nigger", "faggot", "retard", "chink", "spic", "kike",
-  "coon", "slut", "whore"
-];
+// === Helpers ===
+const saveUsernames = () => fs.writeFileSync(usernamesPath, JSON.stringify(usernames, null, 2));
+const saveHistory = () => fs.writeFileSync(historyPath, JSON.stringify(chatHistory, null, 2));
+const saveFiles = () => fs.writeFileSync(filesMetaPath, JSON.stringify(fileList, null, 2));
 
-function sanitizeMessage(text) {
-  let cleaned = text;
-  for (const bad of bannedWords) {
-    const regex = new RegExp(`\\b${bad}\\b`, "gi");
-    if (regex.test(cleaned)) {
-      cleaned = cleaned.replace(regex, "****");
-    }
-  }
-  return cleaned;
-}
-
-function saveUsernames() {
-  fs.writeFileSync(usernamesPath, JSON.stringify(usernames, null, 2));
-}
-function saveHistory() {
-  fs.writeFileSync(historyPath, JSON.stringify(chatHistory.slice(-200), null, 2));
-}
-function broadcast(data, exclude = null) {
-  for (const client of wss.clients) {
-    if (client.readyState === 1 && client !== exclude) {
-      client.send(JSON.stringify(data));
-    }
-  }
-}
-
-// --- File Upload Endpoint ---
-app.post("/upload", upload.single("file"), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-  const fileUrl = `/uploads/${req.file.filename}`;
-  const chatEntry = {
-    type: "file",
-    nick: req.body.nick || "Unknown",
-    fileName: req.file.originalname,
-    fileUrl,
-    time: Date.now()
-  };
-  chatHistory.push(chatEntry);
-  saveHistory();
-  broadcast(chatEntry);
-  res.json({ success: true, fileUrl });
+// === Upload Middleware ===
+const upload = multer({
+  dest: uploadsDir,
+  limits: { fileSize: 1024 * 1024 * 1024 } // 1GB max per file
 });
+app.use('/uploads', express.static(uploadsDir));
 
-// --- WebSocket Handling ---
-wss.on("connection", (ws) => {
-  ws.id = Math.random().toString(36).slice(2);
-  ws.nick = usernames[ws.id] || `Guest${Math.floor(Math.random() * 1000)}`;
-  ws.isAdmin = false;
+// === Slur Filter ===
+const bannedWords = ['nigger', 'faggot', 'retard', 'kike', 'coon'];
+const containsSlur = (text) => bannedWords.some(w => text.toLowerCase().includes(w));
 
-  ws.send(JSON.stringify({ type: "history", history: chatHistory }));
-  ws.send(JSON.stringify({ type: "system", message: "Welcome to TerminusChat." }));
-  sendUserList();
+// === Connected Clients ===
+const clients = new Map(); // ws -> { nick, admin }
 
-  ws.on("message", (raw) => {
-    let data;
+// === Broadcast ===
+function broadcast(data, except = null) {
+  const msg = JSON.stringify(data);
+  for (const [ws] of clients) {
+    if (ws !== except && ws.readyState === ws.OPEN) ws.send(msg);
+  }
+}
+
+function sendTo(ws, data) {
+  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(data));
+}
+
+// === File Utilities ===
+function calculateTotalUploadSize() {
+  return fs.readdirSync(uploadsDir)
+    .map(f => fs.statSync(path.join(uploadsDir, f)).size)
+    .reduce((a, b) => a + b, 0);
+}
+
+// === WebSocket Handling ===
+wss.on('connection', (ws) => {
+  clients.set(ws, { nick: 'guest', admin: false });
+
+  // Send chat history and user list
+  sendTo(ws, { type: 'history', data: chatHistory });
+  sendTo(ws, { type: 'files', data: fileList });
+  broadcastUserList();
+
+  ws.on('message', (msg) => {
     try {
-      data = JSON.parse(raw);
-    } catch {
-      return;
-    }
+      const { type, data } = JSON.parse(msg);
 
-    if (data.type === "chat") {
-      let msg = sanitizeMessage(data.message.trim());
-      if (!msg) return;
-
-      if (msg.startsWith("/")) {
-        handleCommand(msg, ws);
+      if (type === 'setNick') {
+        const prev = clients.get(ws).nick;
+        clients.get(ws).nick = data.trim();
+        usernames[ws._socket.remoteAddress] = data.trim();
+        saveUsernames();
+        sendTo(ws, { type: 'system', text: `Your nickname is now ${data}` });
+        broadcastUserList();
         return;
       }
 
-      const chatEntry = {
-        nick: ws.nick,
-        message: msg,
-        time: Date.now(),
-      };
-      chatHistory.push(chatEntry);
-      saveHistory();
-      broadcast({ type: "chat", ...chatEntry });
-    } else if (data.type === "setNick") {
-      const newNick = sanitizeMessage(data.nick.trim());
-      if (!newNick) return;
-      ws.nick = newNick;
-      usernames[ws.id] = newNick;
-      saveUsernames();
-      ws.send(JSON.stringify({ type: "system", message: `Your nickname is now ${newNick}.` }));
-      sendUserList();
+      if (type === 'login') {
+        if (data === ADMIN_KEY) {
+          clients.get(ws).admin = true;
+          sendTo(ws, { type: 'system', text: `You are now logged in as admin.` });
+        } else {
+          sendTo(ws, { type: 'system', text: `Invalid admin key.` });
+        }
+        return;
+      }
+
+      if (type === 'logout') {
+        clients.get(ws).admin = false;
+        sendTo(ws, { type: 'system', text: `You have logged out as admin.` });
+        return;
+      }
+
+      if (type === 'clear') {
+        if (!clients.get(ws).admin) {
+          sendTo(ws, { type: 'system', text: 'You do not have permission to clear chat.' });
+          return;
+        }
+        chatHistory = [];
+        saveHistory();
+        broadcast({ type: 'clear' });
+        return;
+      }
+
+      if (type === 'removefile') {
+        if (!clients.get(ws).admin) {
+          sendTo(ws, { type: 'system', text: 'Permission denied.' });
+          return;
+        }
+        const fileToDelete = data.trim();
+        const fullPath = path.join(uploadsDir, fileToDelete);
+        if (fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
+          fileList = fileList.filter(f => f.name !== fileToDelete);
+          saveFiles();
+          broadcast({ type: 'files', data: fileList });
+          broadcast({ type: 'system', text: `${fileToDelete} was removed by admin.` });
+        } else {
+          sendTo(ws, { type: 'system', text: 'File not found.' });
+        }
+        return;
+      }
+
+      if (type === 'message') {
+        const sender = clients.get(ws);
+        const text = data.text.trim();
+
+        if (containsSlur(text)) {
+          sendTo(ws, { type: 'system', text: 'Message blocked: inappropriate language.' });
+          return;
+        }
+
+        if (text.startsWith('/msg ')) {
+          const [_, targetNick, ...msgParts] = text.split(' ');
+          const privateMsg = msgParts.join(' ');
+          for (const [client, info] of clients) {
+            if (info.nick === targetNick) {
+              sendTo(client, { type: 'private', from: sender.nick, text: privateMsg });
+              sendTo(ws, { type: 'private', to: targetNick, text: privateMsg });
+              return;
+            }
+          }
+          sendTo(ws, { type: 'system', text: `${targetNick} not found.` });
+          return;
+        }
+
+        // Normal message
+        const entry = {
+          nick: sender.nick,
+          text,
+          time: new Date().toISOString()
+        };
+        chatHistory.push(entry);
+        if (chatHistory.length > 500) chatHistory.shift(); // Limit history size
+        saveHistory();
+
+        broadcast({ type: 'message', data: entry });
+      }
+    } catch (e) {
+      console.error('Message error:', e);
     }
   });
 
-  ws.on("close", () => {
-    delete usernames[ws.id];
-    saveUsernames();
-    sendUserList();
+  ws.on('close', () => {
+    clients.delete(ws);
+    broadcastUserList();
   });
 });
 
-function handleCommand(cmd, ws) {
-  const [command, ...args] = cmd.slice(1).split(" ");
-  switch (command.toLowerCase()) {
-    case "help":
-      ws.send(JSON.stringify({
-        type: "system",
-        message: "Commands: /help, /msg <user> <message>, /login <key>, /logout, /clear"
-      }));
-      break;
-    case "clear":
-      if (!ws.isAdmin) {
-        ws.send(JSON.stringify({ type: "system", message: "You are not authorized." }));
-        return;
-      }
-      chatHistory = [];
-      saveHistory();
-      broadcast({ type: "system", message: "[Admin] Chat cleared by admin." });
-      break;
-    case "login":
-      if (args[0] === process.env.ADMIN_KEY) {
-        ws.isAdmin = true;
-        ws.send(JSON.stringify({ type: "system", message: "Admin access granted." }));
-      } else {
-        ws.send(JSON.stringify({ type: "system", message: "Invalid admin key." }));
-      }
-      break;
-    case "logout":
-      ws.isAdmin = false;
-      ws.send(JSON.stringify({ type: "system", message: "Admin access revoked." }));
-      break;
-    default:
-      ws.send(JSON.stringify({ type: "system", message: "Unknown command." }));
+// === Update User List ===
+function broadcastUserList() {
+  const list = Array.from(clients.values()).map(u => ({
+    nick: u.nick,
+    admin: u.admin
+  }));
+  broadcast({ type: 'users', data: list });
+}
+
+// === Upload Endpoint ===
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    const totalSize = calculateTotalUploadSize();
+    if (totalSize > 1024 * 1024 * 1024) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Upload limit exceeded (1GB total).' });
+    }
+
+    const fileMeta = {
+      name: req.file.filename,
+      original: req.file.originalname,
+      size: req.file.size,
+      time: new Date().toISOString(),
+      url: `/uploads/${req.file.filename}`
+    };
+    fileList.push(fileMeta);
+    saveFiles();
+    broadcast({ type: 'files', data: fileList });
+    res.json(fileMeta);
+  } catch (err) {
+    console.error('Upload error:', err);
+    res.status(500).json({ error: 'Upload failed.' });
   }
-}
+});
 
-function sendUserList() {
-  const users = Array.from(wss.clients)
-    .filter(c => c.readyState === 1)
-    .map(c => ({ nick: c.nick, admin: c.isAdmin }));
-  broadcast({ type: "userList", users });
-}
+// === Serve Frontend ===
+app.use(express.static(path.join(__dirname, 'dist')));
+app.get('*', (_, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`✅ TerminusChat server running on ${PORT}`));
+// === Start Server ===
+server.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
