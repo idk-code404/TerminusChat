@@ -4,6 +4,7 @@ import { WebSocketServer } from "ws";
 import fs from "fs";
 import path from "path";
 import cors from "cors";
+import multer from "multer";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,25 +16,42 @@ const wss = new WebSocketServer({ server });
 app.use(cors());
 app.use(express.json());
 
-// Paths
+// Create uploads directory
+const uploadDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+
+// Serve uploaded files statically
+app.use("/uploads", express.static(uploadDir));
+
+// --- Multer setup for file uploads ---
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const safeName = Date.now() + "_" + file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    cb(null, safeName);
+  }
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB max
+});
+
+// Paths for persistent data
 const usernamesPath = path.join(__dirname, "usernames.json");
 const historyPath = path.join(__dirname, "chatHistory.json");
 
-// Ensure files exist
 if (!fs.existsSync(usernamesPath)) fs.writeFileSync(usernamesPath, "{}");
 if (!fs.existsSync(historyPath)) fs.writeFileSync(historyPath, "[]");
 
-// Load persistent data
 let usernames = JSON.parse(fs.readFileSync(usernamesPath));
 let chatHistory = JSON.parse(fs.readFileSync(historyPath));
 
 // --- MODERATION CONFIG ---
 const bannedWords = [
-  "nigger", "faggot", "retard", "chink", "spic", "kike", // etc. (add responsibly)
+  "nigger", "faggot", "retard", "chink", "spic", "kike",
   "coon", "slut", "whore"
 ];
 
-// Basic sanitizer (you can replace with a regex or external library)
 function sanitizeMessage(text) {
   let cleaned = text;
   for (const bad of bannedWords) {
@@ -45,15 +63,12 @@ function sanitizeMessage(text) {
   return cleaned;
 }
 
-// Helper: save files safely
 function saveUsernames() {
   fs.writeFileSync(usernamesPath, JSON.stringify(usernames, null, 2));
 }
 function saveHistory() {
   fs.writeFileSync(historyPath, JSON.stringify(chatHistory.slice(-200), null, 2));
 }
-
-// Helper: broadcast message
 function broadcast(data, exclude = null) {
   for (const client of wss.clients) {
     if (client.readyState === 1 && client !== exclude) {
@@ -62,22 +77,37 @@ function broadcast(data, exclude = null) {
   }
 }
 
-// --- MAIN WEBSOCKET HANDLING ---
+// --- File Upload Endpoint ---
+app.post("/upload", upload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+  const fileUrl = `/uploads/${req.file.filename}`;
+  const chatEntry = {
+    type: "file",
+    nick: req.body.nick || "Unknown",
+    fileName: req.file.originalname,
+    fileUrl,
+    time: Date.now()
+  };
+  chatHistory.push(chatEntry);
+  saveHistory();
+  broadcast(chatEntry);
+  res.json({ success: true, fileUrl });
+});
+
+// --- WebSocket Handling ---
 wss.on("connection", (ws) => {
   ws.id = Math.random().toString(36).slice(2);
   ws.nick = usernames[ws.id] || `Guest${Math.floor(Math.random() * 1000)}`;
   ws.isAdmin = false;
 
-  // Send history and user list
   ws.send(JSON.stringify({ type: "history", history: chatHistory }));
+  ws.send(JSON.stringify({ type: "system", message: "Welcome to TerminusChat." }));
   sendUserList();
 
-  ws.send(JSON.stringify({ type: "system", message: "Welcome to TerminusChat." }));
-
-  ws.on("message", (msgData) => {
+  ws.on("message", (raw) => {
     let data;
     try {
-      data = JSON.parse(msgData);
+      data = JSON.parse(raw);
     } catch {
       return;
     }
@@ -86,7 +116,6 @@ wss.on("connection", (ws) => {
       let msg = sanitizeMessage(data.message.trim());
       if (!msg) return;
 
-      // handle commands
       if (msg.startsWith("/")) {
         handleCommand(msg, ws);
         return;
@@ -99,7 +128,6 @@ wss.on("connection", (ws) => {
       };
       chatHistory.push(chatEntry);
       saveHistory();
-
       broadcast({ type: "chat", ...chatEntry });
     } else if (data.type === "setNick") {
       const newNick = sanitizeMessage(data.nick.trim());
@@ -119,7 +147,6 @@ wss.on("connection", (ws) => {
   });
 });
 
-// --- COMMAND HANDLER ---
 function handleCommand(cmd, ws) {
   const [command, ...args] = cmd.slice(1).split(" ");
   switch (command.toLowerCase()) {
@@ -155,7 +182,6 @@ function handleCommand(cmd, ws) {
   }
 }
 
-// --- ONLINE USERS LIST ---
 function sendUserList() {
   const users = Array.from(wss.clients)
     .filter(c => c.readyState === 1)
