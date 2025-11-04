@@ -1,6 +1,6 @@
 // server.js
 // TerminusChat — WS server with persistent usernames and chat history.
-// place usernames.json and messages.json next to this file (they can start as {} and [] respectively)
+// Place usernames.json and messages.json next to this file (they can start as {} and [] respectively)
 
 const fs = require('fs');
 const path = require('path');
@@ -65,7 +65,7 @@ function broadcast(obj, except = null) {
   const data = JSON.stringify(obj);
   for (const c of wss.clients) {
     if (c.readyState === WebSocket.OPEN && c !== except) {
-      try { c.send(data); } catch (e) { /* ignore */ }
+      try { c.send(data); } catch (e) { /* ignore send errors */ }
     }
   }
 }
@@ -81,7 +81,7 @@ function broadcastUserList() {
   broadcast({ type: 'user-list', users: list });
 }
 
-// find client by nickname (case-sensitive)
+// find client by nickname (exact match)
 function findClientByNick(nick) {
   for (const c of wss.clients) {
     if (c.readyState === WebSocket.OPEN && c.nick === nick) return c;
@@ -89,14 +89,27 @@ function findClientByNick(nick) {
   return null;
 }
 
-// push to history (public messages & system events). Keeps length <= MAX_HISTORY
+// ensure item has ts and type and push to history (for public messages & system messages)
 function pushHistory(item) {
-  // item should be a plain object (e.g. { type:'message', nick, text, ts })
-  history.push(item);
+  const safe = {
+    type: item.type || 'system',
+    text: item.text || '',
+    nick: item.nick || null,
+    ts: item.ts || Date.now()
+  };
+  history.push(safe);
   if (history.length > MAX_HISTORY) {
     history = history.slice(history.length - MAX_HISTORY);
   }
   saveHistory();
+}
+
+// Send history to a single ws client (most recent first or preserve order)
+function sendHistoryTo(ws) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({ type: 'history', history: history.slice(-MAX_HISTORY) }));
+  } catch (e) { /* ignore */ }
 }
 
 wss.on('connection', (ws) => {
@@ -104,10 +117,10 @@ wss.on('connection', (ws) => {
   ws.clientId = null;
   ws.nick = 'guest_' + Math.floor(Math.random() * 10000);
 
-  // send a private welcome and current history (most clients expect to receive history)
+  // send a private welcome and current history (client should render history)
   try {
-    ws.send(JSON.stringify({ type: 'system', text: 'Welcome to TerminusChat. Identify to restore your saved nickname.' }));
-    ws.send(JSON.stringify({ type: 'history', history: history.slice(-MAX_HISTORY) }));
+    ws.send(JSON.stringify({ type: 'system', text: 'Welcome to TerminusChat. Send {type: "identify", clientId, nick} to restore your name.' }));
+    sendHistoryTo(ws);
   } catch (e) { /* ignore */ }
 
   // inform others of new connection
@@ -115,9 +128,8 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (raw) => {
     let msg;
-    try { msg = JSON.parse(raw); } catch (e) { 
-      // invalid JSON - ignore or optionally reply
-      try { ws.send(JSON.stringify({ type: 'system', text: 'Invalid message format.' })); } catch {}
+    try { msg = JSON.parse(raw); } catch (e) {
+      try { ws.send(JSON.stringify({ type: 'system', text: 'Invalid JSON message.' })); } catch {}
       return;
     }
 
@@ -138,7 +150,10 @@ wss.on('connection', (ws) => {
         try { ws.send(JSON.stringify({ type: 'identified', clientId, nick: ws.nick })); } catch {}
       }
 
-      // broadcast updated presence & (optionally) broadcast system that user restored name
+      // send history again now that we've set nick (client may want to render after identify)
+      sendHistoryTo(ws);
+
+      // broadcast updated presence
       broadcastUserList();
       return;
     }
@@ -170,7 +185,10 @@ wss.on('connection', (ws) => {
       if (msg.key === ADMIN_KEY) {
         ws.isAdmin = true;
         if (ws.readyState === WebSocket.OPEN) {
-          try { ws.send(JSON.stringify({ type: 'admin-status', value: true })); ws.send(JSON.stringify({ type: 'system', text: 'Admin privileges granted.' })); } catch {}
+          try {
+            ws.send(JSON.stringify({ type: 'admin-status', value: true }));
+            ws.send(JSON.stringify({ type: 'system', text: 'Admin privileges granted.' }));
+          } catch {}
         }
         broadcastUserList();
       } else {
@@ -183,7 +201,10 @@ wss.on('connection', (ws) => {
     if (msg.type === 'logout') {
       ws.isAdmin = false;
       if (ws.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify({ type: 'admin-status', value: false })); ws.send(JSON.stringify({ type: 'system', text: 'Logged out of admin mode.' })); } catch {}
+        try {
+          ws.send(JSON.stringify({ type: 'admin-status', value: false }));
+          ws.send(JSON.stringify({ type: 'system', text: 'Logged out of admin mode.' }));
+        } catch {}
       }
       broadcastUserList();
       return;
@@ -192,11 +213,11 @@ wss.on('connection', (ws) => {
     // CLEAR chat
     if (msg.type === 'clear') {
       if (ws.isAdmin) {
-        history = []; saveHistory();
+        history = [];
+        saveHistory();
         broadcast({ type: 'clear' });
-        // system notice after clear (it will appear in new history)
         const sys = { type: 'system', text: `[ADMIN] Global chat cleared by ${ws.nick}.`, ts: Date.now() };
-        pushHistory(sys);
+        pushHistory(sys); // persist the system message for history
         broadcast(sys);
       } else {
         if (ws.readyState === WebSocket.OPEN) {
@@ -220,7 +241,7 @@ wss.on('connection', (ws) => {
       if (ws.readyState === WebSocket.OPEN) {
         try { ws.send(JSON.stringify(payload)); } catch {}
       }
-      // NOTE: private messages are NOT stored in public history
+      // private messages are NOT stored in public history
       return;
     }
 
