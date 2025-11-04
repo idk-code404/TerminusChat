@@ -117,9 +117,9 @@ wss.on('connection', (ws) => {
   ws.clientId = null;
   ws.nick = 'guest_' + Math.floor(Math.random() * 10000);
 
-  // send a private welcome and current history (client should render history)
+  // send a private welcome (simplified) and current history (client should render history)
   try {
-    ws.send(JSON.stringify({ type: 'system', text: 'Welcome to TerminusChat. Send {type: "identify", clientId, nick} to restore your name.' }));
+    ws.send(JSON.stringify({ type: 'system', text: 'Welcome to TerminusChat.' }));
     sendHistoryTo(ws);
   } catch (e) { /* ignore */ }
 
